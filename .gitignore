@@ -1,0 +1,38 @@
+# caches
+__pycache__/
+.cache/
+.huggingface/
+
+# envs
+.venv/
+venv/
+.env/
+.env
+conda/
+__pycache__/
+*.pyc
+*.pyo
+
+# data + outputs
+data/
+datasets/
+outputs/
+outputs_jepa/
+logs/
+wandb/
+
+# checkpoints / weights
+checkpoints/
+checkpoints_jepa/
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+*.tar
+*.tar.gz
+*.safetensors
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
