@@ -31,7 +31,9 @@ segmentation/
 Task: Pneumonia vs Normal classification
 Model: Frozen ViT encoder + linear probe
 
-Encoder: RAD-DINO
+Enocder options:
+- RAD-DINO (DINOv2 ViT-B/14)
+- RAD-JEPA (ViT-B trained with JEPA self-supervised learning)
 Head: linear classifier
 Evaluation: Accuracy, Balanced Accuracy, Macro F1, ROC-AUC
 Designed as a clean linear-probe baseline
@@ -44,12 +46,14 @@ classification/
 3) Report Generation
 Task: Chest X-ray → radiology Findings text
 
-Architecture:
-- Vision encoder: RAD-DINO (frozen)
-- Projector: MLP mapping vision tokens to LLM embedding space
-- LLM: Vicuna-7B with QLoRA + LoRA
-- Training: projector + LoRA weights only
-- Dataset: image + Findings text pairs
+
+Enocder options:
+- RAD-DINO (DINOv2 ViT-B/14)
+- RAD-JEPA (ViT-B trained with JEPA self-supervised learning)
+Projector: MLP mapping vision tokens to LLM embedding space
+LLM: Vicuna-7B with QLoRA + LoRA
+Training: projector + LoRA weights only
+Dataset: image + Findings text pairs
 
 Location:
 report_generation/
