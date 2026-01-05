@@ -1,4 +1,6 @@
 # src/infer_test_cls_fast.py
+
+
 from pathlib import Path
 import csv
 import glob
@@ -12,6 +14,7 @@ import numpy as np
 
 from src.models.linear_probe import LinearProbeClassifier
 from src.backbones.rad_dino_backbone import build_rad_dino_backbone
+from src.backbones.rad_jepa_backbone import build_rad_jepa_backbone
 
 
 # ------------- CONFIG -------------
@@ -21,6 +24,9 @@ IMAGE_SIZE = 224
 BATCH_SIZE = 1
 NUM_WORKERS = 2
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+BACKBONE = "dino"  # "dino" or "jepa"
+JEPA_BACKBONE_CKPT = Path("/data1/mariam/best_jepa_weights.pth.tar")  # only used if BACKBONE="jepa"
 
 # choose one:
 # CKPT_PATH = Path("checkpoints/epoch_10.pt")
@@ -43,19 +49,32 @@ def pil_to_tensor_resize(img: Image.Image, size: int) -> torch.Tensor:
     """
     Match training preprocessing:
     - Resize (H,W) to (size,size)
-    - Convert to float tensor in [0,1], shape [3,H,W]
+    - Convert to float tensor, shape [3,H,W]
+    - ImageNet normalization
     """
+    IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
+    IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
+
     img = img.convert("RGB")
     img = img.resize((size, size))
     arr = np.array(img, dtype=np.float32) / 255.0        # [H,W,3] in [0,1]
     arr = np.transpose(arr, (2, 0, 1))                   # -> [3,H,W]
+    arr = (arr - IMAGENET_MEAN) / IMAGENET_STD           # normalize
     return torch.from_numpy(arr)
 
 
 def to_uint8(img_tensor: torch.Tensor) -> np.ndarray:
-    """[3,H,W] float -> uint8 [H,W,3]"""
-    img = img_tensor.detach().cpu().clamp(0, 1)
-    img = (img * 255).byte().permute(1, 2, 0).numpy()
+    """
+    img_tensor: [3,H,W] normalized
+    -> uint8 [H,W,3] for saving/overlay
+    """
+    mean = torch.tensor([0.485, 0.456, 0.406], device=img_tensor.device)[:, None, None]
+    std  = torch.tensor([0.229, 0.224, 0.225], device=img_tensor.device)[:, None, None]
+
+    img = img_tensor.detach()
+    img = img * std + mean                 # back to [0,1] approx
+    img = img.clamp(0, 1)
+    img = (img * 255).byte().permute(1, 2, 0).cpu().numpy()
     return img
 
 
@@ -148,11 +167,39 @@ def main():
 
     num_classes = len(classes)
 
-    backbone = build_rad_dino_backbone(device=DEVICE)
+    if BACKBONE == "dino":
+        backbone = build_rad_dino_backbone(device=DEVICE)
+    else:
+        assert JEPA_BACKBONE_CKPT.exists(), f"Missing JEPA backbone ckpt: {JEPA_BACKBONE_CKPT}"
+        backbone = build_rad_jepa_backbone(jepa_ckpt=str(JEPA_BACKBONE_CKPT), device=DEVICE)
     model = LinearProbeClassifier(backbone=backbone, num_classes=num_classes).to(DEVICE)
 
-    state = torch.load(CKPT_PATH, map_location="cpu")
-    model.load_state_dict(state, strict=True)
+    model.backbone.eval()
+    for p in model.backbone.parameters():
+        p.requires_grad = False
+
+    ckpt = torch.load(CKPT_PATH, map_location="cpu")
+
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        state = ckpt["model"]
+    elif isinstance(ckpt, dict) and "state_dict" in ckpt:
+        state = ckpt["state_dict"]
+    else:
+        state = ckpt
+
+    new_state = {}
+    for k, v in state.items():
+        if k.startswith("module."):
+            k = k[len("module."):]
+        if k.startswith("model."):
+            k = k[len("model."):]
+        new_state[k] = v
+
+    missing, unexpected = model.load_state_dict(new_state, strict=False)
+    if missing:
+        print("Missing keys (first 20):", missing[:20])
+    if unexpected:
+        print("Unexpected keys (first 20):", unexpected[:20])
     model.eval()
 
     print(f"Loaded checkpoint: {CKPT_PATH}")

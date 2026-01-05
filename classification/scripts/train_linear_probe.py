@@ -11,16 +11,23 @@ from torchvision import transforms
 
 from src.models.linear_probe import LinearProbeClassifier
 from src.backbones.rad_dino_backbone import build_rad_dino_backbone
+from src.backbones.rad_jepa_backbone import build_rad_jepa_backbone
 
 
 def build_loaders(data_root: str, image_size: int, batch_size: int, num_workers: int):
+    IMAGENET_MEAN = (0.485, 0.456, 0.406)
+    IMAGENET_STD  = (0.229, 0.224, 0.225)
+
     tfm_train = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
+
     tfm_val = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
 
     train_ds = ImageFolder(root=os.path.join(data_root, "train"), transform=tfm_train)
@@ -53,6 +60,9 @@ def save_state_dict(model, path):
 
 def main():
     parser = argparse.ArgumentParser()
+
+    parser.add_argument("--backbone", type=str, default="dino", choices=["dino", "jepa"])
+    parser.add_argument("--jepa_ckpt", type=str, default=None, help="Path to JEPA pretrained weights")
 
     parser.add_argument("--data_root", type=str, default="data")
     parser.add_argument("--image_size", type=int, default=224)
@@ -89,13 +99,13 @@ def main():
     if args.wandb:
         wandb.init(
             project=args.wandb_project,
-            name=args.wandb_name if args.wandb_name else f"rad-dino-linear-bs{args.batch_size}-lr{args.lr}",
+            name=args.wandb_name if args.wandb_name else f"rad-{args.backbone.upper()}-linear-bs{args.batch_size}-lr{args.lr}",
             config={
                 "epochs": args.epochs,
                 "batch_size": args.batch_size,
                 "lr": args.lr,
                 "weight_decay": args.weight_decay,
-                "encoder": "RAD-DINO ViT-B (frozen)",
+                "encoder": f"RAD-{args.backbone.upper()} ViT-B (frozen)",
                 "head": "Linear probe",
                 "dataset_root": args.data_root,
                 "classes": classes,
@@ -103,8 +113,20 @@ def main():
         )
 
     # model
-    backbone = build_rad_dino_backbone(device=device)
+    if args.backbone == "dino":
+        backbone = build_rad_dino_backbone(device=device)
+    else:
+        if args.jepa_ckpt is None:
+            raise ValueError("For --backbone jepa you must pass --jepa_ckpt /path/to/weights.pth.tar")
+        backbone = build_rad_jepa_backbone(jepa_ckpt=args.jepa_ckpt, device=device)
+
     model = LinearProbeClassifier(backbone=backbone, num_classes=num_classes).to(device)
+
+    # ensure frozen backbone 
+    model.backbone.eval()
+    for p in model.backbone.parameters():
+        p.requires_grad = False
+
 
     # loss + optimizer (HEAD ONLY)
     criterion = nn.CrossEntropyLoss()
@@ -116,6 +138,7 @@ def main():
     for epoch in range(args.epochs):
         # ===== TRAIN =====
         model.train()
+        model.backbone.eval()
         train_loss = 0.0
         train_correct = 0
         train_total = 0

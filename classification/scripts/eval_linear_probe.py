@@ -11,12 +11,17 @@ from torchvision import transforms
 
 from src.models.linear_probe import LinearProbeClassifier
 from src.backbones.rad_dino_backbone import build_rad_dino_backbone
+from src.backbones.rad_jepa_backbone import build_rad_jepa_backbone
 
 
 def build_loader(data_root: str, split: str, image_size: int, batch_size: int, num_workers: int):
+    IMAGENET_MEAN = (0.485, 0.456, 0.406)
+    IMAGENET_STD  = (0.229, 0.224, 0.225)
+
     tfm = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
 
     ds = ImageFolder(root=os.path.join(data_root, split), transform=tfm)
@@ -34,6 +39,9 @@ def build_loader(data_root: str, split: str, image_size: int, batch_size: int, n
 def main():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("--backbone", type=str, default="dino", choices=["dino", "jepa"])
+    parser.add_argument("--jepa_ckpt", type=str, default=None, help="Path to JEPA pretrained weights")
+
     parser.add_argument("--data_root", type=str, default="data")
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
     parser.add_argument("--ckpt", type=str, required=True)
@@ -44,7 +52,7 @@ def main():
 
     # wandb
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--wandb_project", type=str, default="rad-dino-linear-probe")
+    parser.add_argument("--wandb_project", type=str, default="rad-linear-probe")
     parser.add_argument("--wandb_name", type=str, default="eval")
 
     args = parser.parse_args()
@@ -73,23 +81,48 @@ def main():
                 "image_size": args.image_size,
                 "dataset_root": args.data_root,
                 "classes": ds.classes,
-                "encoder": "RAD-DINO ViT-B (frozen)",
+                "encoder": f"RAD-{args.backbone.upper()} ViT-B (frozen)",
                 "head": "Linear probe",
             }
         )
 
     # model
-    backbone = build_rad_dino_backbone(device=device)
-    model = LinearProbeClassifier(backbone=backbone, num_classes=num_classes).to(device)
-
-    state = torch.load(args.ckpt, map_location="cpu")
-    # Support BOTH formats:
-    # 1) checkpoint dict with "model" key (if you saved full ckpt)
-    # 2) raw state_dict (if you saved model.state_dict())
-    if isinstance(state, dict) and "model" in state:
-        model.load_state_dict(state["model"], strict=True)
+    if args.backbone == "dino":
+        backbone = build_rad_dino_backbone(device=device)
     else:
-        model.load_state_dict(state, strict=True)
+        if args.jepa_ckpt is None:
+            raise ValueError("For --backbone jepa you must pass --jepa_ckpt /path/to/weights.pth.tar")
+        backbone = build_rad_jepa_backbone(jepa_ckpt=args.jepa_ckpt, device=device)
+
+    model = LinearProbeClassifier(backbone=backbone, num_classes=num_classes).to(device)
+    model.backbone.eval()
+    for p in model.backbone.parameters():
+        p.requires_grad = False
+
+    ckpt = torch.load(args.ckpt, map_location="cpu")
+
+    # support: {"model": ...} OR {"state_dict": ...} OR raw state_dict
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        state = ckpt["model"]
+    elif isinstance(ckpt, dict) and "state_dict" in ckpt:
+        state = ckpt["state_dict"]
+    else:
+        state = ckpt
+
+    # strip common prefixes
+    new_state = {}
+    for k, v in state.items():
+        if k.startswith("module."):
+            k = k[len("module."):]
+        if k.startswith("model."):
+            k = k[len("model."):]
+        new_state[k] = v
+
+    missing, unexpected = model.load_state_dict(new_state, strict=False)
+    if missing:
+        print("Missing keys (first 20):", missing[:20])
+    if unexpected:
+        print("Unexpected keys (first 20):", unexpected[:20])
 
     model.eval()
 
