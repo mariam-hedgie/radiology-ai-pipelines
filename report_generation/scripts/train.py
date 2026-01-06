@@ -17,8 +17,8 @@ from transformers import (
 from src.config import TrainConfig
 from src.utils.seed import set_seed
 from src.utils.ckpt import save_ckpt
-from src.data.dataset import JsonlImageTextDataset
-from src.data.collate import CollateImageText
+from src.data_functions.dataset import JsonlImageTextDataset
+from src.data_functions.collate import CollateImageText
 from src.models.report_generator import VisionLLMReportGenerator
 from src.models.rad_dino_encoder import FrozenRadDinoEncoder
 from src.models.rad_jepa_encoder import FrozenRadJepaEncoder
@@ -27,7 +27,7 @@ from src.models.rad_jepa_encoder import FrozenRadJepaEncoder
 def main():
     parser = argparse.ArgumentParser()
 
-    # data / model ids
+    # data/model ids
     parser.add_argument("--data_root", type=str, default=None)
     parser.add_argument("--backbone", type=str, required=True, choices=["rad-dino", "rad-jepa"])
     parser.add_argument("--vision_id", type=str, required=True,
@@ -179,10 +179,11 @@ def main():
         for step, batch in enumerate(pbar):
             # move tensors to device (collate returns tensors)
             batch["images"] = batch["images"].to(device, non_blocking=True)
-            batch["prompt_input_ids"] = batch["prompt_input_ids"].to(device, non_blocking=True)
-            batch["target_input_ids"] = batch["target_input_ids"].to(device, non_blocking=True)
+            batch["input_ids"] = batch["input_ids"].to(device, non_blocking=True)
+            batch["attention_mask"] = batch["attention_mask"].to(device, non_blocking=True)
+            batch["labels"] = batch["labels"].to(device, non_blocking=True)
 
-            loss = model(batch, tokenizer) / cfg.grad_accum
+            loss = model(batch) / cfg.grad_accum
             loss.backward()
 
             running_epoch_loss += loss.item() * cfg.grad_accum

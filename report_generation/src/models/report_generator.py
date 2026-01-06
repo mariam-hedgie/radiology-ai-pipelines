@@ -15,79 +15,80 @@ class VisionLLMReportGenerator(nn.Module):
         # projector: 768 -> LLM hidden
         llm_hidden = self.llm.config.hidden_size
         vision_dim = getattr(vision_encoder, "embed_dim", None)
-
         if vision_dim is None:
-            # fallback: run one dummy forward to infer D
-            with torch.no_grad():
-                dummy = torch.zeros(1, 3, 224, 224)  # or cfg.image_size if you pass it in
-                pt = vision_encoder(dummy)
-                vision_dim = pt.shape[-1]
-
+            raise ValueError("vision_encoder must define .embed_dim")
         self.projector = MLPProjector(in_dim=vision_dim, out_dim=llm_hidden)
 
     def freeze_vision(self):
+        self.vision.eval()
         for p in self.vision.parameters():
             p.requires_grad = False
 
-    def forward(self, batch, tokenizer):
+    def forward(self, batch, tokenizer=None):
         """
         batch contains:
-          images [B,3,H,W]
-          prompt_input_ids [B,Tp]
-          target_input_ids [B,Tt]
-        We build inputs_embeds = [image_embeds, prompt_embeds, target_embeds]
-        labels = [-100 for image+prompt, target_ids for target]
+        images [B,3,H,W] in [0,1]
+        input_ids [B,T]
+        attention_mask [B,T]
+        labels [B,T]   (prompt masked as -100)
         """
-        images = batch["images"].to(next(self.parameters()).device)
-        prompt_ids = batch["prompt_input_ids"].to(images.device)
-        target_ids = batch["target_input_ids"].to(images.device)
+        device = next(self.parameters()).device
+
+        images = batch["images"].to(device)
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
 
         # 1) vision tokens (frozen)
         with torch.no_grad():
-            patch_tokens = self.vision(images)           # [B,N,768]
+            patch_tokens = self.vision(images)              # [B,N,D]
 
-        # 2) project to LLM space
-        image_embeds = self.projector(patch_tokens)      # [B,N,H]
+        # 2) project to LLM hidden
+        image_embeds = self.projector(patch_tokens)         # [B,N,H]
 
-        # 3) text embeddings
-        prompt_embeds = self.llm.get_input_embeddings()(prompt_ids)  # [B,Tp,H]
-        target_embeds = self.llm.get_input_embeddings()(target_ids)  # [B,Tt,H]
+        # 3) text token embeddings for the whole sequence
+        text_embeds = self.llm.get_input_embeddings()(input_ids)  # [B,T,H]
 
-        # 4) concat
-        inputs_embeds = torch.cat([image_embeds, prompt_embeds, target_embeds], dim=1)
+        # 4) prepend image embeddings
+        inputs_embeds = torch.cat([image_embeds, text_embeds], dim=1)  # [B,N+T,H]
 
-        # 5) attention mask: 1s for everything
+        # 5) expand attention mask (image tokens are all "real")
         B, N, _ = image_embeds.shape
-        Tp = prompt_ids.shape[1]
-        Tt = target_ids.shape[1]
-        attn_mask = torch.ones((B, N + Tp + Tt), dtype=torch.long, device=images.device)
+        img_attn = torch.ones((B, N), dtype=attention_mask.dtype, device=device)
+        attn = torch.cat([img_attn, attention_mask], dim=1)            # [B,N+T]
 
-        # 6) labels: ignore image+prompt, supervise target
-        ignore = torch.full((B, N + Tp), -100, dtype=torch.long, device=images.device)
-        labels = torch.cat([ignore, target_ids], dim=1)
+        # 6) expand labels: ignore image tokens
+        img_labels = torch.full((B, N), -100, dtype=labels.dtype, device=device)
+        full_labels = torch.cat([img_labels, labels], dim=1)           # [B,N+T]
 
-        out = self.llm(inputs_embeds=inputs_embeds, attention_mask=attn_mask, labels=labels)
+        out = self.llm(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attn,
+            labels=full_labels
+        )
         return out.loss
 
     @torch.no_grad()
-    def generate(self, images, prompt_ids, max_new_tokens=150, temperature=0.7):
+    def generate(self, images, input_ids, attention_mask=None, max_new_tokens=150, temperature=0.7):
         device = next(self.parameters()).device
         images = images.to(device)
-        prompt_ids = prompt_ids.to(device)
+        input_ids = input_ids.to(device)
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, device=device)
 
-        patch_tokens = self.vision(images)                 # [B,N,768]
+        patch_tokens = self.vision(images)                 # [B,N,D]
         image_embeds = self.projector(patch_tokens)        # [B,N,H]
-        prompt_embeds = self.llm.get_input_embeddings()(prompt_ids)
+        text_embeds = self.llm.get_input_embeddings()(input_ids)
 
-        inputs_embeds = torch.cat([image_embeds, prompt_embeds], dim=1)
+        inputs_embeds = torch.cat([image_embeds, text_embeds], dim=1)
 
         B, N, _ = image_embeds.shape
-        Tp = prompt_ids.shape[1]
-        attn_mask = torch.ones((B, N + Tp), dtype=torch.long, device=device)
+        img_attn = torch.ones((B, N), dtype=attention_mask.dtype, device=device)
+        attn = torch.cat([img_attn, attention_mask], dim=1)
 
         gen = self.llm.generate(
             inputs_embeds=inputs_embeds,
-            attention_mask=attn_mask,
+            attention_mask=attn,
             max_new_tokens=max_new_tokens,
             do_sample=True,
             temperature=temperature,

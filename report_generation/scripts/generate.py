@@ -10,8 +10,8 @@ from transformers import AutoTokenizer, AutoModel, AutoImageProcessor
 
 from src.config import TrainConfig
 from src.utils.ckpt import load_ckpt
-from src.data.dataset import JsonlImageTextDataset
-from src.data.collate import CollateImageText
+from src.data_functions.dataset import JsonlImageTextDataset
+from src.data_functions.collate import CollateImageText
 from src.models.report_generator import VisionLLMReportGenerator
 from src.models.rad_dino_encoder import FrozenRadDinoEncoder
 from src.models.rad_jepa_encoder import FrozenRadJepaEncoder
@@ -21,7 +21,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default="data/dummy")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
-    parser.add_argument("--ckpt", type=str, required=True)
+    parser.add_argument("--ckpt", type=str, required=True,
+                        help="Path to PEFT adapter checkpoint directory (e.g. checkpoints/best)")
     parser.add_argument("--backbone", type=str, required=True, choices=["rad-dino", "rad-jepa"])
     parser.add_argument("--vision_id", type=str, required=True, help="HF model id for the vision encoder")
     parser.add_argument("--out", type=str, default="outputs/preds.jsonl")
@@ -31,7 +32,7 @@ def main():
 
     # wandb
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--project", type=str, default="rad-dino-report-gen")
+    parser.add_argument("--project", type=str, default="rad-report-gen")
     parser.add_argument("--run_name", type=str, default="generate")
 
     args = parser.parse_args()
@@ -54,7 +55,8 @@ def main():
                 "data_root": args.data_root,
                 "split": args.split,
                 "ckpt": args.ckpt,
-                "rad_dino_id": args.rad_dino_id,
+                "backbone": args.backbone,
+                "vision_id": args.vision_id,
                 "llm_name": cfg.llm_name,
                 "prompt": cfg.prompt,
                 "max_new_tokens": cfg.max_new_tokens,
@@ -69,33 +71,48 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # ---- dataset ----
-    jsonl_name = {"train": cfg.train_jsonl, "val": cfg.val_jsonl, "test": getattr(cfg, "test_jsonl", cfg.val_jsonl)}[args.split]
+    jsonl_name = {
+        "train": cfg.train_jsonl,
+        "val": cfg.val_jsonl,
+        "test": getattr(cfg, "test_jsonl", cfg.val_jsonl)
+    }[args.split]
     ds = JsonlImageTextDataset(cfg.data_root, jsonl_name=jsonl_name)
 
+    # We use collate mainly to get consistent image preprocessing -> batch["images"]
     collate = CollateImageText(tokenizer, cfg.prompt, cfg.image_size, cfg.max_text_len)
 
-    # ---- build RAD-DINO vision encoder (frozen) ----
-    image_processor = AutoImageProcessor.from_pretrained(args.rad_dino_id)
-    rad_dino = AutoModel.from_pretrained(args.rad_dino_id)
+    # ---- build vision encoder (frozen) ----
+    image_processor = AutoImageProcessor.from_pretrained(args.vision_id)
+    vision_base = AutoModel.from_pretrained(args.vision_id, trust_remote_code=True)
 
-    vision = FrozenRadDinoEncoder(rad_dino_model=rad_dino, image_processor=image_processor).to(device)
+    if args.backbone == "rad-dino":
+        vision = FrozenRadDinoEncoder(
+            rad_dino_model=vision_base,
+            image_processor=image_processor
+        ).to(device)
+    else:
+        vision = FrozenRadJepaEncoder(
+            rad_jepa_model=vision_base,
+            image_processor=image_processor
+        ).to(device)
 
     # ---- build full model ----
     model = VisionLLMReportGenerator(vision_encoder=vision, llm_name=cfg.llm_name).to(device)
     model.freeze_vision()
 
-    # ---- load checkpoint ----
+    # ---- load PEFT adapter checkpoint ----
     model, _ = load_ckpt(args.ckpt, model, optimizer=None, map_location="cpu")
     model.eval()
 
     # ---- prompt ids (batch size 1 for generation) ----
-    prompt_ids = tokenizer([cfg.prompt], return_tensors="pt", padding=False).input_ids.to(device)
+    prompt_ids = tokenizer(cfg.prompt, return_tensors="pt", padding=False).input_ids.to(device)
+    prompt_attn = torch.ones_like(prompt_ids, device=device)
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
     n = min(args.max_samples, len(ds))
     print(f"Generating on {n} samples from split={args.split}")
-    print(f"Checkpoint: {args.ckpt}")
+    print(f"Checkpoint dir: {args.ckpt}")
     print(f"Saving to: {args.out}")
 
     rows = []
@@ -106,7 +123,8 @@ def main():
 
             gen_ids = model.generate(
                 images=imgs,
-                prompt_ids=prompt_ids,
+                input_ids=prompt_ids,
+                attention_mask=prompt_attn,
                 max_new_tokens=cfg.max_new_tokens,
                 temperature=cfg.temperature
             )
@@ -122,10 +140,13 @@ def main():
             }
             rows.append(rec)
 
-            # optional: log a few examples to wandb
             if args.wandb and i < 10:
-                wandb.log({f"sample/{i}": wandb.Table(data=[[rec["path"], rec["target"], rec["gen"]]],
-                                                     columns=["path", "target", "gen"])})
+                wandb.log({
+                    f"sample/{i}": wandb.Table(
+                        data=[[rec["path"], rec["target"], rec["gen"]]],
+                        columns=["path", "target", "gen"]
+                    )
+                })
 
     # write jsonl
     with open(args.out, "w") as f:
