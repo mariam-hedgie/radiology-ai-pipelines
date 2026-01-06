@@ -5,7 +5,7 @@ from transformers import AutoModelForCausalLM
 
 from .projector import MLPProjector
 
-class RadDinoReportGenerator(nn.Module):
+class VisionLLMReportGenerator(nn.Module):
     def __init__(self, vision_encoder, llm_name: str):
         super().__init__()
         self.vision = vision_encoder  # frozen
@@ -14,7 +14,16 @@ class RadDinoReportGenerator(nn.Module):
 
         # projector: 768 -> LLM hidden
         llm_hidden = self.llm.config.hidden_size
-        self.projector = MLPProjector(in_dim=768, out_dim=llm_hidden)
+        vision_dim = getattr(vision_encoder, "embed_dim", None)
+
+        if vision_dim is None:
+            # fallback: run one dummy forward to infer D
+            with torch.no_grad():
+                dummy = torch.zeros(1, 3, 224, 224)  # or cfg.image_size if you pass it in
+                pt = vision_encoder(dummy)
+                vision_dim = pt.shape[-1]
+
+        self.projector = MLPProjector(in_dim=vision_dim, out_dim=llm_hidden)
 
     def freeze_vision(self):
         for p in self.vision.parameters():

@@ -19,8 +19,9 @@ from src.utils.seed import set_seed
 from src.utils.ckpt import save_ckpt
 from src.data.dataset import JsonlImageTextDataset
 from src.data.collate import CollateImageText
-from src.models.report_generator import RadDinoReportGenerator
+from src.models.report_generator import VisionLLMReportGenerator
 from src.models.rad_dino_encoder import FrozenRadDinoEncoder
+from src.models.rad_jepa_encoder import FrozenRadJepaEncoder
 
 
 def main():
@@ -28,8 +29,9 @@ def main():
 
     # data / model ids
     parser.add_argument("--data_root", type=str, default=None)
-    parser.add_argument("--rad_dino_id", type=str, required=True,
-                        help="HuggingFace model id for RAD-DINO encoder")
+    parser.add_argument("--backbone", type=str, required=True, choices=["rad-dino", "rad-jepa"])
+    parser.add_argument("--vision_id", type=str, required=True,
+                        help="HF model id for vision encoder (RAD-DINO or RAD-JEPA)")
     parser.add_argument("--llm_name", type=str, default=None)
 
     # training hyperparams
@@ -71,7 +73,8 @@ def main():
             name=args.run_name,
             config={
                 **cfg.__dict__,
-                "rad_dino_id": args.rad_dino_id
+                "backbone": args.backbone,
+                "vision_id": args.vision_id,
             }
         )
 
@@ -109,18 +112,36 @@ def main():
         pin_memory=True
     )
 
-    # ---------------- RAD-DINO vision encoder (FROZEN) ----------------
-    # HF processor gives correct mean/std normalization for this checkpoint
-    image_processor = AutoImageProcessor.from_pretrained(args.rad_dino_id)
-    rad_dino = AutoModel.from_pretrained(args.rad_dino_id)
+    # make modular
+    image_processor = AutoImageProcessor.from_pretrained(args.vision_id)
+    vision_base = AutoModel.from_pretrained(args.vision_id, trust_remote_code=True)
 
-    vision = FrozenRadDinoEncoder(
-        rad_dino_model=rad_dino,
-        image_processor=image_processor
-    ).to(device)
+    if args.backbone == "rad-dino":
+        vision = FrozenRadDinoEncoder(
+            rad_dino_model=vision_base,
+            image_processor=image_processor
+        ).to(device)
+
+    elif args.backbone == "rad-jepa":
+        vision = FrozenRadJepaEncoder(
+            rad_jepa_model=vision_base,
+            image_processor=image_processor
+        ).to(device)
+
+    else:
+        raise ValueError(f"Unknown backbone: {args.backbone}")
+
+    # ---- sanity check: vision must return [B,N,D] ----
+    vision.eval()
+    with torch.no_grad():
+        dummy = torch.zeros(1, 3, cfg.image_size, cfg.image_size, device=device, dtype=torch.float32)
+        pt = vision(dummy)
+        assert pt.ndim == 3, f"Expected [B,N,D] tokens, got {tuple(pt.shape)}"
+        assert pt.shape[-1] == 768, f"Projector expects 768-dim tokens, got D={pt.shape[-1]}"
+        print("vision tokens:", tuple(pt.shape))
 
     # ---------------- full model ----------------
-    model = RadDinoReportGenerator(
+    model = VisionLLMReportGenerator(
         vision_encoder=vision,
         llm_name=cfg.llm_name
     ).to(device)

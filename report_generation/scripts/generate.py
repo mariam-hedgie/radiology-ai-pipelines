@@ -12,8 +12,9 @@ from src.config import TrainConfig
 from src.utils.ckpt import load_ckpt
 from src.data.dataset import JsonlImageTextDataset
 from src.data.collate import CollateImageText
-from src.models.report_generator import RadDinoReportGenerator
+from src.models.report_generator import VisionLLMReportGenerator
 from src.models.rad_dino_encoder import FrozenRadDinoEncoder
+from src.models.rad_jepa_encoder import FrozenRadJepaEncoder
 
 
 def main():
@@ -21,8 +22,8 @@ def main():
     parser.add_argument("--data_root", type=str, default="data/dummy")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
     parser.add_argument("--ckpt", type=str, required=True)
-    parser.add_argument("--rad_dino_id", type=str, required=True,
-                        help="HuggingFace model id for RAD-DINO encoder")
+    parser.add_argument("--backbone", type=str, required=True, choices=["rad-dino", "rad-jepa"])
+    parser.add_argument("--vision_id", type=str, required=True, help="HF model id for the vision encoder")
     parser.add_argument("--out", type=str, default="outputs/preds.jsonl")
     parser.add_argument("--max_samples", type=int, default=50)
     parser.add_argument("--max_new_tokens", type=int, default=None)
@@ -80,11 +81,11 @@ def main():
     vision = FrozenRadDinoEncoder(rad_dino_model=rad_dino, image_processor=image_processor).to(device)
 
     # ---- build full model ----
-    model = RadDinoReportGenerator(vision_encoder=vision, llm_name=cfg.llm_name).to(device)
+    model = VisionLLMReportGenerator(vision_encoder=vision, llm_name=cfg.llm_name).to(device)
     model.freeze_vision()
 
     # ---- load checkpoint ----
-    load_ckpt(args.ckpt, model, optimizer=None, map_location="cpu")
+    model, _ = load_ckpt(args.ckpt, model, optimizer=None, map_location="cpu")
     model.eval()
 
     # ---- prompt ids (batch size 1 for generation) ----

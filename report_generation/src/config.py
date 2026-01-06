@@ -28,7 +28,7 @@ class TrainConfig:
     # --------------------
     # Vision encoder (RAD-DINO ViT-B)
     # --------------------
-    image_size: int = 224            # start safe; later match RAD-DINO expected size if needed
+    image_size: int = 224         
     vision_embed_dim: int = 768
     freeze_vision: bool = True
 
