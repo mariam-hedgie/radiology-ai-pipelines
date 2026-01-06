@@ -151,9 +151,12 @@ def main():
                 temperature=cfg.temperature,
             )
 
-            # strip prompt tokens so your eval is fair
-            gen_only = gen_ids[0][prompt_len:]
-            gen_text = tokenizer.decode(gen_only, skip_special_tokens=True).strip()
+          
+            full_text = tokenizer.decode(gen_ids[0], skip_special_tokens=True).strip()
+            if full_text.startswith(cfg.prompt):
+                gen_text = full_text[len(cfg.prompt):].strip()
+            else:
+                gen_text = full_text
 
             rec = {
                 "index": i,
