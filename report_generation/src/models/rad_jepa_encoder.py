@@ -9,7 +9,7 @@ class FrozenRadJepaEncoder(nn.Module):
 
     Contract:
       input:  images [B,3,H,W] float in [0,1]
-      output: patch_tokens [B,N,D]  (CLS removed if present)
+      output: patch_tokens [B,N,D] (CLS removed if present)
     """
 
     def __init__(self, rad_jepa_model, image_processor=None):
@@ -23,6 +23,7 @@ class FrozenRadJepaEncoder(nn.Module):
             p.requires_grad = False
 
         # cache mean/std for fast tensor normalization if processor provided
+        # IMPORTANT: don't use names "mean"/"std" as normal attrs AND buffers.
         self._mean = None
         self._std = None
         if self.processor is not None:
@@ -56,35 +57,28 @@ class FrozenRadJepaEncoder(nn.Module):
         # ---- Path A: HuggingFace ViT-style forward ----
         try:
             out = self.model(pixel_values=images, return_dict=True)
-
-            # last_hidden_state: [B, 1+N, D] (CLS + patches) or [B,N,D]
             tokens = getattr(out, "last_hidden_state", None)
             if tokens is not None:
                 if tokens.ndim != 3:
                     raise RuntimeError(f"Unexpected last_hidden_state shape: {tuple(tokens.shape)}")
-                # drop CLS if present (assume first token is CLS when length > 1)
                 return tokens[:, 1:, :] if tokens.shape[1] > 1 else tokens
-
         except TypeError:
-            # signature mismatch; fall through
             pass
 
         # ---- Path B: custom extract_features API ----
         if hasattr(self.model, "extract_features"):
             out = self.model.extract_features(images)
 
-            # dict outputs
             if isinstance(out, dict):
                 for key in ["patch_tokens", "patchtokens", "x_norm_patchtokens", "tokens", "feat", "last_hidden_state"]:
                     if key in out:
                         pt = out[key]
                         if pt.ndim == 2:
-                            return pt.unsqueeze(1)  # [B,1,D] fallback
+                            return pt.unsqueeze(1)
                         if pt.ndim == 3:
                             return pt[:, 1:, :] if pt.shape[1] > 1 else pt
                         raise RuntimeError(f"Unexpected token tensor shape for key={key}: {tuple(pt.shape)}")
 
-            # tuple/list outputs
             if isinstance(out, (tuple, list)) and len(out) > 0:
                 pt = out[0]
                 if pt.ndim == 2:

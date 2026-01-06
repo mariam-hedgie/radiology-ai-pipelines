@@ -1,39 +1,28 @@
-# src/models/rad_jepa_encoder.py
+# src/models/rad_dino_encoder.py
 import torch
 import torch.nn as nn
 
 
-class FrozenRadJepaEncoder(nn.Module):
+class FrozenRadDinoEncoder(nn.Module):
     """
-    Frozen RAD-JEPA encoder wrapper.
+    Frozen RAD-DINO encoder wrapper.
 
     Contract:
       input:  images [B,3,H,W] float in [0,1]
       output: patch_tokens [B,N,D] (CLS removed if present)
     """
 
-    def __init__(self, rad_jepa_model, image_processor=None):
+    def __init__(self, rad_dino_model, image_processor=None):
         super().__init__()
-        self.model = rad_jepa_model
+        self.model = rad_dino_model
         self.processor = image_processor
 
-        # freeze
+        # freeze vision backbone
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
 
-        # cache mean/std for fast tensor normalization if processor provided
-        # IMPORTANT: don't use names "mean"/"std" as normal attrs AND buffers.
-        self._mean = None
-        self._std = None
-        if self.processor is not None:
-            mean = getattr(self.processor, "image_mean", None)
-            std = getattr(self.processor, "image_std", None)
-            if mean is not None and std is not None:
-                self.register_buffer("_mean", torch.tensor(mean).view(1, 3, 1, 1), persistent=False)
-                self.register_buffer("_std", torch.tensor(std).view(1, 3, 1, 1), persistent=False)
-
-        # expose embedding dim for projector/generator
+        # expose embedding dim for projector
         cfg = getattr(self.model, "config", None)
         self.embed_dim = (
             getattr(cfg, "hidden_size", None)
@@ -41,11 +30,38 @@ class FrozenRadJepaEncoder(nn.Module):
             or 768
         )
 
+        # cache mean/std safely (avoid buffer name collision)
+        self._mean = None
+        self._std = None
+        if self.processor is not None:
+            mean = getattr(self.processor, "image_mean", None)
+            std = getattr(self.processor, "image_std", None)
+            if mean is not None and std is not None:
+                self.register_buffer(
+                    "_mean",
+                    torch.tensor(mean).view(1, 3, 1, 1),
+                    persistent=False
+                )
+                self.register_buffer(
+                    "_std",
+                    torch.tensor(std).view(1, 3, 1, 1),
+                    persistent=False
+                )
+
     def _normalize(self, images: torch.Tensor) -> torch.Tensor:
         """images float in [0,1], shape [B,3,H,W]"""
         if self._mean is None or self._std is None:
             return images
         return (images - self._mean.to(images.device)) / self._std.to(images.device)
+
+    def _strip_cls(self, tokens: torch.Tensor) -> torch.Tensor:
+        """
+        tokens: [B,L,D]
+        Remove CLS token if present.
+        """
+        if tokens.ndim != 3:
+            raise RuntimeError(f"Expected [B,L,D], got {tuple(tokens.shape)}")
+        return tokens[:, 1:, :] if tokens.shape[1] > 1 else tokens
 
     @torch.no_grad()
     def forward(self, images: torch.Tensor) -> torch.Tensor:
@@ -57,16 +73,10 @@ class FrozenRadJepaEncoder(nn.Module):
         # ---- Path A: HuggingFace ViT-style forward ----
         try:
             out = self.model(pixel_values=images, return_dict=True)
-
             tokens = getattr(out, "last_hidden_state", None)
             if tokens is not None:
-                if tokens.ndim != 3:
-                    raise RuntimeError(f"Unexpected last_hidden_state shape: {tuple(tokens.shape)}")
-                # drop CLS if present (assume first token is CLS when length > 1)
-                return tokens[:, 1:, :] if tokens.shape[1] > 1 else tokens
-
+                return self._strip_cls(tokens)
         except TypeError:
-            # signature mismatch; fall through
             pass
 
         # ---- Path B: custom extract_features API ----
@@ -74,24 +84,35 @@ class FrozenRadJepaEncoder(nn.Module):
             out = self.model.extract_features(images)
 
             if isinstance(out, dict):
-                for key in ["patch_tokens", "patchtokens", "x_norm_patchtokens", "tokens", "feat", "last_hidden_state"]:
+                for key in [
+                    "patch_tokens",
+                    "patchtokens",
+                    "x_norm_patchtokens",
+                    "tokens",
+                    "feat",
+                    "last_hidden_state",
+                ]:
                     if key in out:
                         pt = out[key]
                         if pt.ndim == 2:
-                            return pt.unsqueeze(1)  # [B,1,D] fallback
+                            return pt.unsqueeze(1)
                         if pt.ndim == 3:
-                            return pt[:, 1:, :] if pt.shape[1] > 1 else pt
-                        raise RuntimeError(f"Unexpected token tensor shape for key={key}: {tuple(pt.shape)}")
+                            return self._strip_cls(pt)
+                        raise RuntimeError(
+                            f"Unexpected token tensor shape for key={key}: {tuple(pt.shape)}"
+                        )
 
             if isinstance(out, (tuple, list)) and len(out) > 0:
                 pt = out[0]
                 if pt.ndim == 2:
                     return pt.unsqueeze(1)
                 if pt.ndim == 3:
-                    return pt[:, 1:, :] if pt.shape[1] > 1 else pt
-                raise RuntimeError(f"Unexpected token tensor shape from extract_features: {tuple(pt.shape)}")
+                    return self._strip_cls(pt)
+                raise RuntimeError(
+                    f"Unexpected token tensor shape from extract_features: {tuple(pt.shape)}"
+                )
 
         raise RuntimeError(
-            "Could not extract patch tokens from RAD-JEPA. "
+            "Could not extract patch tokens from RAD-DINO. "
             "Model output didn't match HF pixel_values or extract_features patterns."
         )

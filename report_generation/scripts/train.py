@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--warmup_ratio", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=None)
     parser.add_argument("--save_every_steps", type=int, default=None)
+    parser.add_argument("--ckpt_dir", type=str, default=None)
 
     # wandb
     parser.add_argument("--wandb", action="store_true")
@@ -52,6 +53,9 @@ def main():
 
     # ---------------- config ----------------
     cfg = TrainConfig()
+    if args.ckpt_dir:
+        cfg.ckpt_dir = args.ckpt_dir
+    os.makedirs(cfg.ckpt_dir, exist_ok=True)
     if args.data_root: cfg.data_root = args.data_root
     if args.llm_name: cfg.llm_name = args.llm_name
     if args.epochs: cfg.epochs = args.epochs
@@ -113,7 +117,7 @@ def main():
     )
 
     # make modular
-    image_processor = AutoImageProcessor.from_pretrained(args.vision_id)
+    image_processor = AutoImageProcessor.from_pretrained(args.vision_id, trust_remote_code=True)
     vision_base = AutoModel.from_pretrained(args.vision_id, trust_remote_code=True)
 
     if args.backbone == "rad-dino":
@@ -137,7 +141,7 @@ def main():
         dummy = torch.zeros(1, 3, cfg.image_size, cfg.image_size, device=device, dtype=torch.float32)
         pt = vision(dummy)
         assert pt.ndim == 3, f"Expected [B,N,D] tokens, got {tuple(pt.shape)}"
-        assert pt.shape[-1] == 768, f"Projector expects 768-dim tokens, got D={pt.shape[-1]}"
+        assert pt.shape[-1] == vision.embed_dim, f"Expected D={vision.embed_dim}, got D={pt.shape[-1]}"
         print("vision tokens:", tuple(pt.shape))
 
     # ---------------- full model ----------------
@@ -218,10 +222,11 @@ def main():
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{cfg.epochs} [val]"):
                 batch["images"] = batch["images"].to(device, non_blocking=True)
-                batch["prompt_input_ids"] = batch["prompt_input_ids"].to(device, non_blocking=True)
-                batch["target_input_ids"] = batch["target_input_ids"].to(device, non_blocking=True)
+                batch["input_ids"] = batch["input_ids"].to(device, non_blocking=True)
+                batch["attention_mask"] = batch["attention_mask"].to(device, non_blocking=True)
+                batch["labels"] = batch["labels"].to(device, non_blocking=True)
 
-                loss = model(batch, tokenizer)
+                loss = model(batch)   # ← forward() now expects this unified batch
                 val_loss += loss.item()
                 n += 1
 
