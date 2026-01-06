@@ -28,11 +28,12 @@ def main():
     parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
     parser.add_argument("--ckpt", type=str, required=True, help="Checkpoint directory (e.g. checkpoints/.../best)")
     parser.add_argument("--backbone", type=str, required=True, choices=["rad-dino", "rad-jepa"])
-    parser.add_argument("--vision_id", type=str, required=True)
+    parser.add_argument("--vision_id", type=str, default=None)
     parser.add_argument("--out", type=str, default="outputs/preds.jsonl")
     parser.add_argument("--max_samples", type=int, default=200)
     parser.add_argument("--max_new_tokens", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--jepa_ckpt", type=str, default=None, help="Path to local JEPA .pth.tar (required for rad-jepa)")
 
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--project", type=str, default="rad-report-gen")
@@ -54,13 +55,24 @@ def main():
     ds = JsonlImageTextDataset(cfg.data_root, jsonl_name=jsonl_name)
 
     # ---- build vision encoder ----
-    image_processor = AutoImageProcessor.from_pretrained(args.vision_id, trust_remote_code=True)
-    vision_base = AutoModel.from_pretrained(args.vision_id, trust_remote_code=True)
-
     if args.backbone == "rad-dino":
+        if args.vision_id is None:
+            raise ValueError("--vision_id is required for rad-dino")
+
+        image_processor = AutoImageProcessor.from_pretrained(args.vision_id, trust_remote_code=True)
+        vision_base = AutoModel.from_pretrained(args.vision_id, trust_remote_code=True)
         vision = FrozenRadDinoEncoder(vision_base, image_processor=image_processor).to(vision_device)
+
+    elif args.backbone == "rad-jepa":
+        if args.jepa_ckpt is None:
+            raise ValueError("--jepa_ckpt is required for rad-jepa (local checkpoint)")
+
+        # IMPORTANT: your rad_jepa_encoder.py must support ckpt_path
+        vision = FrozenRadJepaEncoder(
+            ckpt_path=args.jepa_ckpt
+        ).to(vision_device)
     else:
-        vision = FrozenRadJepaEncoder(vision_base, image_processor=image_processor).to(vision_device)
+        raise ValueError(f"Unknown backbone: {args.backbone}")
 
     # ---- build full model (DO NOT .to(device)) ----
     model = VisionLLMReportGenerator(
