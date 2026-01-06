@@ -101,7 +101,7 @@ def main():
 
     ckpt = torch.load(args.ckpt, map_location="cpu")
 
-    # support: {"model": ...} OR {"state_dict": ...} OR raw state_dict
+    # unwrap common checkpoint formats
     if isinstance(ckpt, dict) and "model" in ckpt:
         state = ckpt["model"]
     elif isinstance(ckpt, dict) and "state_dict" in ckpt:
@@ -109,20 +109,30 @@ def main():
     else:
         state = ckpt
 
-    # strip common prefixes
-    new_state = {}
+    # 1) normalize keys: remove "module." / "model." prefixes
+    norm = {}
     for k, v in state.items():
         if k.startswith("module."):
             k = k[len("module."):]
         if k.startswith("model."):
             k = k[len("model."):]
-        new_state[k] = v
+        norm[k] = v
 
-    missing, unexpected = model.load_state_dict(new_state, strict=False)
-    if missing:
-        print("Missing keys (first 20):", missing[:20])
-    if unexpected:
-        print("Unexpected keys (first 20):", unexpected[:20])
+    # 2) extract ONLY classifier weights
+    head_state = {}
+    for k, v in norm.items():
+        if k.startswith("classifier."):
+            head_state[k[len("classifier."):]] = v
+
+    if len(head_state) == 0:
+        raise RuntimeError(
+            f"No classifier.* keys found in checkpoint {args.ckpt}. "
+            f"Available keys (first 30): {list(norm.keys())[:30]}"
+        )
+
+    # 3) load head strictly (this should NOT be flexible)
+    model.classifier.load_state_dict(head_state, strict=True)
+    print(f"Loaded linear head from: {args.ckpt} (keys: {list(head_state.keys())})")
 
     model.eval()
 

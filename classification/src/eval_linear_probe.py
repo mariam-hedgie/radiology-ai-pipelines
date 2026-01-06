@@ -10,15 +10,20 @@ from PIL import Image
 
 from src.models.linear_probe import LinearProbeClassifier
 from src.backbones.rad_dino_backbone import build_rad_dino_backbone
+from src.backbones.rad_jepa_backbone import build_rad_jepa_backbone
 
 
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
 
 
 def pil_to_tensor_resize(img: Image.Image, size: int) -> torch.Tensor:
+    IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
+    IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
+
     img = img.convert("RGB").resize((size, size))
-    arr = np.array(img, dtype=np.float32) / 255.0
-    arr = np.transpose(arr, (2, 0, 1))
+    arr = np.array(img, dtype=np.float32) / 255.0      # [H,W,3] in [0,1]
+    arr = np.transpose(arr, (2, 0, 1))                 # -> [3,H,W]
+    arr = (arr - IMAGENET_MEAN) / IMAGENET_STD         # normalize
     return torch.from_numpy(arr)
 
 
@@ -127,6 +132,8 @@ def binary_auc_from_scores(y_true: np.ndarray, y_score: np.ndarray) -> float:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--backbone", type=str, default="dino", choices=["dino", "jepa"])
+    parser.add_argument("--jepa_ckpt", type=str, default=None, help="Path to JEPA pretrained weights (.pth/.pth.tar)")
     parser.add_argument("--data_root", type=str, default="data")
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
     parser.add_argument("--image_size", type=int, default=224)
@@ -151,10 +158,52 @@ def main():
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.num_workers, collate_fn=collate_fn)
 
-    backbone = build_rad_dino_backbone(device=device)
+    # ---- build backbone ----
+    if args.backbone == "dino":
+        backbone = build_rad_dino_backbone(device=device)
+    else:
+        if args.jepa_ckpt is None:
+            raise ValueError("For --backbone jepa you must pass --jepa_ckpt /path/to/best_jepa_weights.pth.tar")
+        backbone = build_rad_jepa_backbone(jepa_ckpt=args.jepa_ckpt, device=device)
+
     model = LinearProbeClassifier(backbone=backbone, num_classes=num_classes).to(device)
-    state = torch.load(ckpt_path, map_location="cpu")
-    model.load_state_dict(state, strict=True)
+
+    # freeze backbone (safety)
+    model.backbone.eval()
+    for p in model.backbone.parameters():
+        p.requires_grad = False
+
+    # ---- load ONLY the linear head from checkpoint ----
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        state = ckpt["model"]
+    elif isinstance(ckpt, dict) and "state_dict" in ckpt:
+        state = ckpt["state_dict"]
+    else:
+        state = ckpt
+
+    # normalize prefixes
+    norm = {}
+    for k, v in state.items():
+        if k.startswith("module."):
+            k = k[len("module."):]
+        if k.startswith("model."):
+            k = k[len("model."):]
+        norm[k] = v
+
+    # extract classifier.* weights only
+    head_state = {}
+    for k, v in norm.items():
+        if k.startswith("classifier."):
+            head_state[k[len("classifier."):]] = v
+
+    if len(head_state) == 0:
+        raise RuntimeError(
+            f"No classifier.* keys found in checkpoint {ckpt_path}. "
+            f"Keys (first 30): {list(norm.keys())[:30]}"
+        )
+
+    model.classifier.load_state_dict(head_state, strict=True)
     model.eval()
 
     all_true = []
