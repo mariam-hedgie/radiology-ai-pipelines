@@ -2,49 +2,74 @@
 import torch
 import torch.nn as nn
 
+try:
+    from timm.models.vision_transformer import VisionTransformer
+except ImportError as e:
+    raise ImportError("timm is required. Install with: pip install timm") from e
+
 
 class FrozenRadJepaEncoder(nn.Module):
     """
-    Frozen RAD-JEPA encoder wrapper.
+    Frozen LOCAL JEPA encoder wrapper (loads your .pth.tar checkpoint).
 
     Contract:
       input:  images [B,3,H,W] float in [0,1]
-      output: patch_tokens [B,N,D] (CLS removed if present)
+      output: patch_tokens [B,N,D]  (NO CLS token)
     """
 
-    def __init__(self, rad_jepa_model, image_processor=None):
+    def __init__(
+        self,
+        ckpt_path: str,
+        image_size: int = 224,
+        mean=(0.5, 0.5, 0.5),
+        std=(0.5, 0.5, 0.5),
+    ):
         super().__init__()
-        self.model = rad_jepa_model
-        self.processor = image_processor
 
-        # freeze
+        if image_size != 224:
+            raise ValueError("This local JEPA wrapper currently supports image_size=224 only.")
+
+        # Build ViT-B/14 manually (matches your checkpoint shapes)
+        self.model = VisionTransformer(
+            img_size=224,
+            patch_size=14,
+            in_chans=3,
+            num_classes=0,
+            embed_dim=768,
+            depth=12,
+            num_heads=12,
+            mlp_ratio=4.0,
+            qkv_bias=True,
+            class_token=False,   # IMPORTANT: matches pos_embed length=256 (no CLS)
+            global_pool="",      # keep token outputs
+        )
+
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        if not isinstance(ckpt, dict) or "encoder" not in ckpt:
+            raise RuntimeError(
+                f"Expected a dict with key 'encoder' in {ckpt_path}. Got keys: {list(ckpt.keys())}"
+            )
+
+        sd = ckpt["encoder"]  # OrderedDict of tensors
+        missing, unexpected = self.model.load_state_dict(sd, strict=False)
+
+        # If these lists are huge, your architecture mismatch is real.
+        if unexpected:
+            print("[JEPA] Unexpected keys (sample):", unexpected[:10])
+        if missing:
+            print("[JEPA] Missing keys (sample):", missing[:10])
+
+        # Freeze
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
 
-        # cache mean/std for fast tensor normalization if processor provided
-        # IMPORTANT: don't use names "mean"/"std" as normal attrs AND buffers.
-        self._mean = None
-        self._std = None
-        if self.processor is not None:
-            mean = getattr(self.processor, "image_mean", None)
-            std = getattr(self.processor, "image_std", None)
-            if mean is not None and std is not None:
-                self.register_buffer("_mean", torch.tensor(mean).view(1, 3, 1, 1), persistent=False)
-                self.register_buffer("_std", torch.tensor(std).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("_mean", torch.tensor(mean).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("_std", torch.tensor(std).view(1, 3, 1, 1), persistent=False)
 
-        # expose embedding dim for projector/generator
-        cfg = getattr(self.model, "config", None)
-        self.embed_dim = (
-            getattr(cfg, "hidden_size", None)
-            or getattr(cfg, "embed_dim", None)
-            or 768
-        )
+        self.embed_dim = 768
 
     def _normalize(self, images: torch.Tensor) -> torch.Tensor:
-        """images float in [0,1], shape [B,3,H,W]"""
-        if self._mean is None or self._std is None:
-            return images
         return (images - self._mean.to(images.device)) / self._std.to(images.device)
 
     @torch.no_grad()
@@ -54,40 +79,10 @@ class FrozenRadJepaEncoder(nn.Module):
 
         images = self._normalize(images)
 
-        # ---- Path A: HuggingFace ViT-style forward ----
-        try:
-            out = self.model(pixel_values=images, return_dict=True)
-            tokens = getattr(out, "last_hidden_state", None)
-            if tokens is not None:
-                if tokens.ndim != 3:
-                    raise RuntimeError(f"Unexpected last_hidden_state shape: {tuple(tokens.shape)}")
-                return tokens[:, 1:, :] if tokens.shape[1] > 1 else tokens
-        except TypeError:
-            pass
+        # forward_features returns tokens (since class_token=False, it’s [B,256,768])
+        tokens = self.model.forward_features(images)
 
-        # ---- Path B: custom extract_features API ----
-        if hasattr(self.model, "extract_features"):
-            out = self.model.extract_features(images)
+        if tokens.ndim != 3:
+            raise RuntimeError(f"Expected [B,N,D], got {tuple(tokens.shape)}")
 
-            if isinstance(out, dict):
-                for key in ["patch_tokens", "patchtokens", "x_norm_patchtokens", "tokens", "feat", "last_hidden_state"]:
-                    if key in out:
-                        pt = out[key]
-                        if pt.ndim == 2:
-                            return pt.unsqueeze(1)
-                        if pt.ndim == 3:
-                            return pt[:, 1:, :] if pt.shape[1] > 1 else pt
-                        raise RuntimeError(f"Unexpected token tensor shape for key={key}: {tuple(pt.shape)}")
-
-            if isinstance(out, (tuple, list)) and len(out) > 0:
-                pt = out[0]
-                if pt.ndim == 2:
-                    return pt.unsqueeze(1)
-                if pt.ndim == 3:
-                    return pt[:, 1:, :] if pt.shape[1] > 1 else pt
-                raise RuntimeError(f"Unexpected token tensor shape from extract_features: {tuple(pt.shape)}")
-
-        raise RuntimeError(
-            "Could not extract patch tokens from RAD-JEPA. "
-            "Model output didn't match HF pixel_values or extract_features patterns."
-        )
+        return tokens

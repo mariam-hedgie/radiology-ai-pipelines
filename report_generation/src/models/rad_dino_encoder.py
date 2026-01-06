@@ -1,4 +1,3 @@
-# src/models/rad_dino_encoder.py
 import torch
 import torch.nn as nn
 
@@ -30,35 +29,32 @@ class FrozenRadDinoEncoder(nn.Module):
             or 768
         )
 
-        # cache mean/std safely (avoid buffer name collision)
-        self._mean = None
-        self._std = None
+        # cache mean/std as BUFFERS (no attribute name collisions)
         if self.processor is not None:
             mean = getattr(self.processor, "image_mean", None)
             std = getattr(self.processor, "image_std", None)
             if mean is not None and std is not None:
                 self.register_buffer(
-                    "_mean",
+                    "_mean_buf",
                     torch.tensor(mean).view(1, 3, 1, 1),
-                    persistent=False
+                    persistent=False,
                 )
                 self.register_buffer(
-                    "_std",
+                    "_std_buf",
                     torch.tensor(std).view(1, 3, 1, 1),
-                    persistent=False
+                    persistent=False,
                 )
 
     def _normalize(self, images: torch.Tensor) -> torch.Tensor:
         """images float in [0,1], shape [B,3,H,W]"""
-        if self._mean is None or self._std is None:
+        mean = getattr(self, "_mean_buf", None)
+        std = getattr(self, "_std_buf", None)
+        if mean is None or std is None:
             return images
-        return (images - self._mean.to(images.device)) / self._std.to(images.device)
+        return (images - mean.to(images.device)) / std.to(images.device)
 
     def _strip_cls(self, tokens: torch.Tensor) -> torch.Tensor:
-        """
-        tokens: [B,L,D]
-        Remove CLS token if present.
-        """
+        """tokens: [B,L,D] -> remove CLS if present"""
         if tokens.ndim != 3:
             raise RuntimeError(f"Expected [B,L,D], got {tuple(tokens.shape)}")
         return tokens[:, 1:, :] if tokens.shape[1] > 1 else tokens
@@ -98,9 +94,7 @@ class FrozenRadDinoEncoder(nn.Module):
                             return pt.unsqueeze(1)
                         if pt.ndim == 3:
                             return self._strip_cls(pt)
-                        raise RuntimeError(
-                            f"Unexpected token tensor shape for key={key}: {tuple(pt.shape)}"
-                        )
+                        raise RuntimeError(f"Unexpected token tensor shape for key={key}: {tuple(pt.shape)}")
 
             if isinstance(out, (tuple, list)) and len(out) > 0:
                 pt = out[0]
@@ -108,9 +102,7 @@ class FrozenRadDinoEncoder(nn.Module):
                     return pt.unsqueeze(1)
                 if pt.ndim == 3:
                     return self._strip_cls(pt)
-                raise RuntimeError(
-                    f"Unexpected token tensor shape from extract_features: {tuple(pt.shape)}"
-                )
+                raise RuntimeError(f"Unexpected token tensor shape from extract_features: {tuple(pt.shape)}")
 
         raise RuntimeError(
             "Could not extract patch tokens from RAD-DINO. "

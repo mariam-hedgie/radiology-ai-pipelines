@@ -54,7 +54,7 @@ class TrainConfig:
     # --------------------
     epochs: int = 3                  
     batch_size: int = 1              # start 1, increase later
-    grad_accum_steps: int = 4        # effective batch ~4
+    grad_accum: int = 4        # effective batch ~4
     lr: float = 2e-5                 # paper LR
     warmup_ratio: float = 0.03
     weight_decay: float = 0.0
