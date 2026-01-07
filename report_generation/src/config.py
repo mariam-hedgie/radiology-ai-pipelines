@@ -24,6 +24,7 @@ class TrainConfig:
     prompt: str = "Provide a description of the findings in the radiology image."
     max_text_len: int = 512          # can try 256 if this doesn't work
     max_new_tokens: int = 150        # paper inference length
+    temperature: float = 0.7
 
     # --------------------
     # Vision encoder (RAD-DINO ViT-B)
