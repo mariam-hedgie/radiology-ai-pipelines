@@ -17,7 +17,7 @@ from src.data_functions.collate import CollateImageText
 from src.models.report_generator import VisionLLMReportGenerator
 from src.models.rad_dino_encoder import FrozenRadDinoEncoder
 from src.models.rad_jepa_encoder import FrozenRadJepaEncoder
-
+from src.models.hf_ijepa_encoder import FrozenHFIJEPAEncoder
 
 
 
@@ -31,7 +31,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--data_root", type=str, default=None)
-    parser.add_argument("--backbone", type=str, required=True, choices=["rad-dino", "rad-jepa"])
+    parser.add_argument("--backbone", type=str, required=True, choices=["rad-dino", "rad-jepa", "ijepa-hf"])
     parser.add_argument("--vision_id", type=str, default=None)
     parser.add_argument("--llm_name", type=str, default=None)
 
@@ -108,6 +108,10 @@ def main():
     # NOTE: tokenizer comes from the model (QLoRA builder) — but collate needs it.
     # We'll build the vision + model first, then build collate/loaders.
 
+    # change image size to 448x448 if IJEPA
+    if args.backbone == "ijepa-hf":
+        cfg.image_size = 448
+
     # ---------------- vision backbone ----------------
     if args.backbone == "rad-dino":
         if args.vision_id is None:
@@ -136,6 +140,14 @@ def main():
             ckpt_path=args.jepa_ckpt,
             image_size=cfg.image_size,
         ).to(vision_device)
+    
+    
+    elif args.backbone == "ijepa-hf":
+        if args.vision_id is None:
+            args.vision_id = "facebook/ijepa_vith16_1k"
+        image_processor = AutoImageProcessor.from_pretrained(args.vision_id)
+        vision_base = AutoModel.from_pretrained(args.vision_id)
+        vision = FrozenHFIJEPAEncoder(vision_base, image_processor).to(vision_device)
 
     else:
         raise ValueError(f"Unknown backbone: {args.backbone}")

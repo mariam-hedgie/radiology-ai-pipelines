@@ -15,7 +15,7 @@ from src.data_functions.collate import CollateImageText
 from src.models.report_generator import VisionLLMReportGenerator
 from src.models.rad_dino_encoder import FrozenRadDinoEncoder
 from src.models.rad_jepa_encoder import FrozenRadJepaEncoder
-
+from src.models.hf_ijepa_encoder import FrozenHFIJEPAEncoder
 
 def _get_llm_device(model: VisionLLMReportGenerator) -> torch.device:
     emb = model.llm.get_input_embeddings()
@@ -54,6 +54,10 @@ def main():
     jsonl_name = {"train": cfg.train_jsonl, "val": cfg.val_jsonl, "test": cfg.test_jsonl}[args.split]
     ds = JsonlImageTextDataset(cfg.data_root, jsonl_name=jsonl_name)
 
+    # change image size to 448x448 if IJEPA
+    if args.backbone == "ijepa-hf":
+        cfg.image_size = 448
+
     # ---- build vision encoder ----
     if args.backbone == "rad-dino":
         if args.vision_id is None:
@@ -71,6 +75,15 @@ def main():
         vision = FrozenRadJepaEncoder(
             ckpt_path=args.jepa_ckpt
         ).to(vision_device)
+
+    
+    elif args.backbone == "ijepa-hf":
+        if args.vision_id is None:
+            args.vision_id = "facebook/ijepa_vith16_1k"
+
+        image_processor = AutoImageProcessor.from_pretrained(args.vision_id)
+        vision_base = AutoModel.from_pretrained(args.vision_id)
+        vision = FrozenHFIJEPAEncoder(vision_base, image_processor).to(vision_device)
     else:
         raise ValueError(f"Unknown backbone: {args.backbone}")
 
