@@ -27,7 +27,7 @@ def main():
     parser.add_argument("--data_root", type=str, default="data/iu_xray")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
     parser.add_argument("--ckpt", type=str, required=True, help="Checkpoint directory (e.g. checkpoints/.../best)")
-    parser.add_argument("--backbone", type=str, required=True, choices=["rad-dino", "rad-jepa"])
+    parser.add_argument("--backbone", type=str, required=True, choices=["rad-dino", "rad-jepa", "ijepa-hf"])
     parser.add_argument("--vision_id", type=str, default=None)
     parser.add_argument("--out", type=str, default="outputs/preds.jsonl")
     parser.add_argument("--max_samples", type=int, default=200)
