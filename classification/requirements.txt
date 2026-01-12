@@ -12,3 +12,6 @@ wandb
 transformers
 einops
 jaxtyping
+pydicom
+pandas
+torchmetrics
