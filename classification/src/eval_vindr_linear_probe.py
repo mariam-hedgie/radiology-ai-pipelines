@@ -3,87 +3,24 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
-import pydicom
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from torch import nn
 from tqdm import tqdm
 import wandb
 
-from torchvision import transforms
-from PIL import Image
-
 from torchmetrics.classification import MultilabelAveragePrecision
 
+from src.datasets.vindr_dataset import VinDrCXRImageLabels
 from src.models.linear_probe import LinearProbeClassifier
 from src.backbones.rad_dino_backbone import build_rad_dino_backbone
 from src.backbones.rad_jepa_backbone import build_rad_jepa_backbone
-
-
-class VinDrCXRImageLabels(Dataset):
-    """
-    VinDr-CXR image-level MULTI-LABEL dataset.
-    Aggregates multiple radiologists per image_id using max() (OR rule).
-    """
-    def __init__(self, split_dir: str, csv_path: str, transform=None):
-        self.split_dir = Path(split_dir)
-        df = pd.read_csv(csv_path)
-        self.transform = transform
-
-        self.label_cols = list(df.columns[2:])
-        self.num_classes = len(self.label_cols)
-
-        grouped = df.groupby("image_id")[self.label_cols].max().reset_index()
-        self.image_ids = grouped["image_id"].tolist()
-        self.labels = grouped[self.label_cols].values.astype(np.float32)
-
-    def __len__(self):
-        return len(self.image_ids)
-
-    def _find_dicom(self, image_id: str) -> Path:
-        for ext in [".dicom", ".dcm", ""]:
-            p = self.split_dir / f"{image_id}{ext}"
-            if p.exists():
-                return p
-        hits = list(self.split_dir.glob(f"{image_id}.*"))
-        if hits:
-            return hits[0]
-        raise FileNotFoundError(f"Missing DICOM for image_id={image_id} under {self.split_dir}")
-
-    def _read_dicom_to_uint8(self, dicom_path: Path) -> np.ndarray:
-        dcm = pydicom.dcmread(str(dicom_path))
-        arr = dcm.pixel_array.astype(np.float32)
-
-        slope = float(getattr(dcm, "RescaleSlope", 1.0))
-        intercept = float(getattr(dcm, "RescaleIntercept", 0.0))
-        arr = arr * slope + intercept
-
-        # robust contrast scaling
-        lo, hi = np.percentile(arr, (1, 99))
-        arr = np.clip(arr, lo, hi)
-        arr = (arr - lo) / max(1e-6, (hi - lo))
-        return (arr * 255.0).clip(0, 255).astype(np.uint8)
-
-    def __getitem__(self, idx):
-        image_id = self.image_ids[idx]
-        y = self.labels[idx]  # float32 [K]
-        dicom_path = self._find_dicom(image_id)
-
-        img_u8 = self._read_dicom_to_uint8(dicom_path)
-        img = Image.fromarray(img_u8).convert("RGB")
-
-        if self.transform is not None:
-            img = self.transform(img)
-        else:
-            img = transforms.ToTensor()(img)
-
-        return img, torch.from_numpy(y)
+from src.backbones.ijepa_backbone import build_ijepa_backbone
 
 
 def load_head_only(model: LinearProbeClassifier, ckpt_path: str):
     """
-    Loads ONLY classifier weights from a checkpoint containing either:
+    Loads ONLY classifier weights from a checkpoint that contains either:
       - full model.state_dict()
       - {"model": state_dict} or {"state_dict": state_dict}
     """
@@ -95,7 +32,7 @@ def load_head_only(model: LinearProbeClassifier, ckpt_path: str):
     else:
         state = ckpt
 
-    # normalize keys: remove common prefixes
+    # normalize prefixes
     norm = {}
     for k, v in state.items():
         if k.startswith("module."):
@@ -104,7 +41,7 @@ def load_head_only(model: LinearProbeClassifier, ckpt_path: str):
             k = k[len("model."):]
         norm[k] = v
 
-    # extract classifier only
+    # extract classifier.* only
     head_state = {}
     for k, v in norm.items():
         if k.startswith("classifier."):
@@ -113,27 +50,63 @@ def load_head_only(model: LinearProbeClassifier, ckpt_path: str):
     if not head_state:
         raise RuntimeError(
             f"No classifier.* keys found in {ckpt_path}. "
-            f"First 30 keys: {list(norm.keys())[:30]}"
+            f"Keys (first 30): {list(norm.keys())[:30]}"
         )
 
     model.classifier.load_state_dict(head_state, strict=True)
-    print(f"Loaded head from {ckpt_path}: {list(head_state.keys())}")
+
+
+@torch.no_grad()
+def eval_one_ckpt(model, loader, device, num_classes: int):
+    model.eval()
+    criterion = nn.BCEWithLogitsLoss()
+
+    auprc_macro = MultilabelAveragePrecision(num_labels=num_classes, average="macro").to(device)
+    auprc_per = MultilabelAveragePrecision(num_labels=num_classes, average=None).to(device)
+
+    loss_sum = 0.0
+    n = 0
+
+    auprc_macro.reset()
+    auprc_per.reset()
+
+    for imgs, targets in tqdm(loader, desc="Eval", leave=False):
+        imgs = imgs.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True).float()
+
+        logits = model(imgs)
+        loss = criterion(logits, targets)
+
+        probs = torch.sigmoid(logits)
+
+        loss_sum += loss.item() * imgs.size(0)
+        n += imgs.size(0)
+
+        auprc_macro.update(probs, targets.int())
+        auprc_per.update(probs, targets.int())
+
+    avg_loss = loss_sum / max(1, n)
+    macro = float(auprc_macro.compute().item())
+    per_ap = auprc_per.compute().detach().cpu().numpy().astype(np.float64)  # [K]
+
+    return avg_loss, macro, per_ap
 
 
 def main():
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--backbone", type=str, default="dino", choices=["dino", "jepa"])
-    ap.add_argument("--jepa_ckpt", type=str, default=None)
+    ap.add_argument("--backbone", type=str, required=True, choices=["dino", "jepa", "ijepa"])
+    ap.add_argument("--jepa_ckpt", type=str, default=None, help="Required when backbone=jepa")
 
     ap.add_argument("--dicom_dir", type=str, required=True)
     ap.add_argument("--labels_csv", type=str, required=True)
+
+    # ONE checkpoint only (no ±)
     ap.add_argument("--ckpt", type=str, required=True)
 
     ap.add_argument("--image_size", type=int, default=224)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--num_workers", type=int, default=4)
-    ap.add_argument("--per_class", action="store_true")
 
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb_project", type=str, default="vindr-linear-probe")
@@ -142,19 +115,31 @@ def main():
     args = ap.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    tfm = transforms.Compose([
-        transforms.Resize((args.image_size, args.image_size)),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ])
+    # Match preprocessing to backbone (IMPORTANT for iJEPA 448)
+    if args.backbone == "ijepa":
+        image_size = 448
+        mean = (0.5, 0.5, 0.5)
+        std = (0.5, 0.5, 0.5)
+    else:
+        image_size = args.image_size
+        mean = (0.485, 0.456, 0.406)
+        std = (0.229, 0.224, 0.225)
 
-    ds = VinDrCXRImageLabels(args.dicom_dir, args.labels_csv, transform=tfm)
+    # Use the SAME dataset class as training
+    ds = VinDrCXRImageLabels(
+        dicom_dir=args.dicom_dir,
+        labels_csv=args.labels_csv,
+        image_size=image_size,
+        mean=mean,
+        std=std,
+    )
+
     loader = DataLoader(
         ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=True,
     )
 
     num_classes = ds.num_classes
@@ -165,94 +150,76 @@ def main():
             project=args.wandb_project,
             name=args.wandb_name,
             config={
-                "ckpt": args.ckpt,
-                "num_classes": num_classes,
                 "backbone": args.backbone,
                 "dicom_dir": args.dicom_dir,
                 "labels_csv": args.labels_csv,
-                "image_size": args.image_size,
+                "image_size": image_size,
                 "batch_size": args.batch_size,
-            }
+                "ckpt": args.ckpt,
+            },
         )
 
-    # backbone
+    # ---- build backbone ----
     if args.backbone == "dino":
         backbone = build_rad_dino_backbone(device=device)
-    else:
+    elif args.backbone == "jepa":
         if args.jepa_ckpt is None:
             raise ValueError("Need --jepa_ckpt when backbone=jepa")
         backbone = build_rad_jepa_backbone(jepa_ckpt=args.jepa_ckpt, device=device)
+    else:
+        backbone = build_ijepa_backbone(device=device)
 
+    # model
     model = LinearProbeClassifier(backbone=backbone, num_classes=num_classes).to(device)
     model.backbone.eval()
     for p in model.backbone.parameters():
         p.requires_grad = False
 
-    load_head_only(model, args.ckpt)
-    model.eval()
+    # ---- load head and eval ----
+    ckpt_path = str(Path(args.ckpt))
+    load_head_only(model, ckpt_path)
 
-    # multi-label loss
-    criterion = nn.BCEWithLogitsLoss()
+    avg_loss, macro, per_ap = eval_one_ckpt(model, loader, device, num_classes)
 
-    # metrics
-    auprc_macro = MultilabelAveragePrecision(num_labels=num_classes, average="macro").to(device)
-    auprc_per = MultilabelAveragePrecision(num_labels=num_classes, average=None).to(device)
+    print(f"\n[{Path(ckpt_path).name}] Loss: {avg_loss:.4f} | AUPRC(macro): {macro:.4f}")
 
-    loss_sum = 0.0
-    n = 0
+    # Print a clean "table-like" set of labels (single values, no ±)
+    table_labels = [
+        "Lung Opacity",
+        "Cardiomegaly",
+        "Pleural thickening",
+        "Aortic enlargement",
+        "Pulmonary fibrosis",
+        "Tuberculosis",
+        "Pleural effusion",
+    ]
 
-    auprc_macro.reset()
-    if args.per_class:
-        auprc_per.reset()
+    print("\nVinDr-CXR (AP/AUPRC) per class (single ckpt):")
+    for name in table_labels:
+        if name not in class_names:
+            print(f"  {name}: MISSING from CSV header")
+            continue
+        i = class_names.index(name)
+        m = 100.0 * float(per_ap[i])  # percent
+        print(f"  {name:18s} {m:5.1f}")
 
-    with torch.no_grad():
-        for imgs, targets in tqdm(loader, desc="Eval", leave=False):
-            imgs = imgs.to(device, non_blocking=True)
-            targets = targets.to(device, non_blocking=True).float()  # BCE expects float targets
-
-            logits = model(imgs)
-            loss = criterion(logits, targets)
-
-            probs = torch.sigmoid(logits)
-
-            loss_sum += loss.item() * imgs.size(0)
-            n += imgs.size(0)
-
-            auprc_macro.update(probs, targets.int())
-            if args.per_class:
-                auprc_per.update(probs, targets.int())
-
-    avg_loss = loss_sum / max(1, n)
-    macro = auprc_macro.compute().item()
-
-    print(f"Loss: {avg_loss:.4f} | AUPRC(macro): {macro:.4f}")
-
-    log_out = {"loss": avg_loss, "auprc_macro": macro}
-
-    if args.per_class:
-        per_ap = auprc_per.compute().detach().cpu().numpy()
-        auprc_std = float(np.std(per_ap))
-        print(f"AUPRC std across classes: {auprc_std:.4f}")
-
-        top_idx = np.argsort(-per_ap)[:10]
-        bottom_idx = np.argsort(per_ap)[:10]
-
-        print("\nTop 10 classes by AUPRC:")
-        for i in top_idx:
-            print(f"  {class_names[i]}: {per_ap[i]:.4f}")
-
-        print("\nBottom 10 classes by AUPRC:")
-        for i in bottom_idx:
-            print(f"  {class_names[i]}: {per_ap[i]:.4f}")
-
-        log_out["auprc_std"] = auprc_std
-
-        # optional: log per-class AUPRCs (careful: many keys)
-        # for i, name in enumerate(class_names):
-        #     log_out[f"auprc/{name}"] = float(per_ap[i])
+    # Also print ALL classes (so you can paste into a full table if needed)
+    print("\nAll classes (single ckpt) — in CSV header order:")
+    for name, apv in zip(class_names, per_ap):
+        print(f"{name:25s} {100.0 * float(apv):5.1f}")
 
     if args.wandb:
-        wandb.log(log_out)
+        wandb.log(
+            {
+                "loss": float(avg_loss),
+                "auprc_macro": float(macro),
+            }
+        )
+        # optional: log table-label APs
+        for name in table_labels:
+            if name in class_names:
+                i = class_names.index(name)
+                wandb.log({f"ap/{name}": float(per_ap[i])})
         wandb.finish()
 
 
