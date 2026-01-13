@@ -16,6 +16,16 @@ __pycache__/
 # data + outputs
 data/
 datasets/
+
+# re-include segmentation datasets source code
+!segmentation/
+!segmentation/src/
+!segmentation/src/datasets/
+!segmentation/src/datasets/*.py
+
+# ignore Python cache
+segmentation/src/datasets/__pycache__/
+
 outputs/
 outputs_jepa/
 logs/

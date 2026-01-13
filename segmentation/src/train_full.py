@@ -9,6 +9,7 @@ from tqdm import tqdm
 import wandb
 
 from src.datasets.lung_dataset import LungSegDataset
+from src.datasets.vindr_rib_dataset import VinDrRibSegDataset
 from src.model import UPerNetSegModel
 
 
@@ -21,8 +22,12 @@ def main():
     ap = argparse.ArgumentParser()
 
     # data
+    ap.add_argument("--dataset", stype=str, required=True,choices=["lung", "vindr_rib"]) # lung is toy dataset, use vindr_rib
     ap.add_argument("--data_root", type=str, default="data/lung_seg")
-    ap.add_argument("--num_classes", type=int, default=2)
+    ap.add_argument("--ann_json", type=str, default=None, help="Path to Vindr_RibCXR_*_mask.json")
+    ap.add_argument("--image_root", type=str, default=None, help="Root that contains Data/train/img etc.")
+    ap.add_argument("--rib_mode", type=str, default="multiclass", choices=["multiclass", "binary"])
+    ap.add_argument("--num_classes", type=int, default=None, help="Override num_classes. If not set, infer from dataset.")
 
     # backbone
     ap.add_argument("--backbone", type=str, required=True, choices=["dino", "jepa", "ijepa"])
@@ -57,21 +62,49 @@ def main():
         image_size = 224
 
     # ----- checkpoint dir: isolate per backbone -----
-    ckpt_dir = Path(args.checkpoint_root) / args.backbone
+    ckpt_dir = Path(args.checkpoint_root) / args.dataset / args.backbone
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # ----- dataset -----
-    # NOTE: LungSegDataset must resize BOTH image and mask to image_size.
-    train_ds = LungSegDataset(
-        img_dir=f"{args.data_root}/train/images",
-        mask_dir=f"{args.data_root}/train/masks",
-        image_size=image_size,   # <-- requires dataset support
-    )
-    val_ds = LungSegDataset(
-        img_dir=f"{args.data_root}/val/images",
-        mask_dir=f"{args.data_root}/val/masks",
-        image_size=image_size,   # <-- requires dataset support
-    )
+    if args.backbone == "ijepa":
+        image_size = 448
+    else:
+        image_size = 224
+
+    if args.dataset == "lung":
+        train_ds = LungSegDataset(
+            img_dir=f"{args.data_root}/train/images",
+            mask_dir=f"{args.data_root}/train/masks",
+            image_size=image_size,
+        )
+        val_ds = LungSegDataset(
+            img_dir=f"{args.data_root}/val/images",
+            mask_dir=f"{args.data_root}/val/masks",
+            image_size=image_size,
+        )
+        inferred_num_classes = args.num_classes or 2  # lung is binary by default
+
+    else:  # vindr_rib
+        if args.ann_json is None or args.image_root is None:
+            raise ValueError("For --dataset vindr_rib you must pass --ann_json and --image_root")
+
+        train_ann = args.ann_json
+        val_ann = train_ann.replace("train", "val") if "train" in train_ann else train_ann
+
+        train_ds = VinDrRibSegDataset(
+            ann_json=train_ann,
+            image_root=args.image_root,
+            image_size=image_size,
+            mode=args.rib_mode,
+        )
+        val_ds = VinDrRibSegDataset(
+            ann_json=val_ann,
+            image_root=args.image_root,
+            image_size=image_size,
+            mode=args.rib_mode,
+        )
+
+        inferred_num_classes = args.num_classes or train_ds.num_classes
 
     train_loader = DataLoader(
         train_ds,
@@ -104,12 +137,15 @@ def main():
                 "num_classes": args.num_classes,
                 "jepa_ckpt": args.jepa_ckpt,
                 "ijepa_model_id": args.ijepa_model_id,
+                "dataset": args.dataset,
+                "rib_mode": args.rib_mode if args.dataset == "vindr_rib",
+                "num_classes": inferred_num_classes,
             },
         )
 
     # ----- model -----
     model = UPerNetSegModel(
-        num_classes=args.num_classes,
+        num_classes=inferred_num_classes,
         backbone=args.backbone,
         jepa_ckpt=args.jepa_ckpt,
         ijepa_model_id=args.ijepa_model_id,
