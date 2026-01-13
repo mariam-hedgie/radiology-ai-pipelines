@@ -13,6 +13,7 @@ from src.datasets.vindr_dataset import VinDrCXRImageLabels
 from src.models.linear_probe import LinearProbeClassifier
 from src.backbones.rad_dino_backbone import build_rad_dino_backbone
 from src.backbones.rad_jepa_backbone import build_rad_jepa_backbone
+from src.backbones.ijepa_backbone import build_ijepa_backbone
 
 
 # ------------------ utils ------------------
@@ -26,7 +27,7 @@ def main():
     ap = argparse.ArgumentParser()
 
     # backbone
-    ap.add_argument("--backbone", type=str, required=True, choices=["dino", "jepa"])
+    ap.add_argument("--backbone", type=str, required=True, choices=["dino", "jepa", "ijepa"])
     ap.add_argument("--jepa_ckpt", type=str, default=None, help="Required if backbone=jepa")
 
     # data
@@ -46,7 +47,7 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
 
     # checkpoints
-    ap.add_argument("--checkpoint_dir", type=str, default="checkpoints_vindr")
+    ap.add_argument("--checkpoint_dir", type=str, default="None")
     ap.add_argument("--save_every", type=int, default=5)
 
     # device
@@ -67,10 +68,21 @@ def main():
     os.makedirs(os.path.join(args.checkpoint_dir, "best"), exist_ok=True)
 
     # ------------------ dataset ------------------
+    if args.backbone == "ijepa":
+        image_size = 448
+        mean = (0.5, 0.5, 0.5)
+        std  = (0.5, 0.5, 0.5)
+    else:
+        image_size = args.image_size
+        mean = (0.485, 0.456, 0.406)
+        std  = (0.229, 0.224, 0.225)
+
     full_ds = VinDrCXRImageLabels(
         dicom_dir=args.train_dicom_dir,
         labels_csv=args.train_csv,
-        image_size=args.image_size,
+        image_size=image_size,
+        mean=mean,
+        std=std,
     )
     num_classes = full_ds.num_classes
 
@@ -124,12 +136,14 @@ def main():
     # ------------------ backbone ------------------
     if args.backbone == "dino":
         backbone = build_rad_dino_backbone(device=device)
+
     elif args.backbone == "jepa":
         if args.jepa_ckpt is None:
-            raise ValueError("--jepa_ckpt is required when --backbone jepa")
+            raise ValueError("For --backbone jepa you must pass --jepa_ckpt /path/to/weights.pth.tar")
         backbone = build_rad_jepa_backbone(jepa_ckpt=args.jepa_ckpt, device=device)
-    else:
-        raise ValueError(f"Unknown backbone: {args.backbone}")
+
+    else:  # ijepa
+        backbone = build_ijepa_backbone(device=device)
 
     model = LinearProbeClassifier(backbone=backbone, num_classes=num_classes).to(device)
 
