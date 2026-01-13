@@ -84,7 +84,8 @@ class UPerNetDecoder(nn.Module):
         fpn_outs = [p4]
 
         for i in reversed(range(len(self.lateral_convs))):
-            lateral = self.lateral_convs[i]([c1, c2, c3][i])
+            c_feats = [c1, c2, c3]
+            lateral = self.lateral_convs[i](c_feats[i])
             p4 = F.interpolate(p4, size=lateral.shape[2:], mode="bilinear", align_corners=False)
             p4 = lateral + p4
             p4 = self.fpn_convs[i](p4)

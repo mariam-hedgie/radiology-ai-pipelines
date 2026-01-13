@@ -1,44 +1,34 @@
-# src/infer_test.py
-import os
+# src/infer.py
+import argparse
 from pathlib import Path
 
+import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from PIL import Image
-import numpy as np
 
 from src.datasets.lung_dataset import LungSegDataset
-#from src.model import RadDinoUPerNet
 from src.model import UPerNetSegModel
 
 
-
-# ------------- CONFIG -------------
-DATA_ROOT = Path("data/lung_seg")
-SPLIT = "test"                       # test split
-NUM_CLASSES = 2
-BATCH_SIZE = 1                       # inference = 1 is fine
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# choose one:
-#CKPT_PATH = Path("checkpoints/epoch_10.pth")
-CKPT_PATH = Path("checkpoints_jepa/best.pth")
-
-OUT_DIR = Path("outputs_jepa") / SPLIT / CKPT_PATH.stem
-SAVE_MAX = 30                        # save first N samples
-# ----------------------------------
-
-
+# ----------------- utils -----------------
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
 
 def to_uint8(img_tensor: torch.Tensor) -> np.ndarray:
-    """img_tensor: [3,H,W] float in [0,1] -> uint8 [H,W,3]"""
-    img = img_tensor.detach().cpu().clamp(0, 1)
-    img = (img * 255).byte().permute(1, 2, 0).numpy()
-    return img
+    """
+    img_tensor: [3,H,W] float (usually normalized) -> uint8 [H,W,3] for visualization.
+    We rescale per-image to [0,1] defensively so it looks sane regardless of normalization.
+    """
+    x = img_tensor.detach().cpu().float()
+
+    # robust min/max rescale for display
+    x = x - x.min()
+    x = x / (x.max().clamp(min=1e-6))
+
+    x = (x * 255.0).clamp(0, 255).byte()
+    return x.permute(1, 2, 0).numpy()
 
 
 def mask_to_color(mask: np.ndarray) -> np.ndarray:
@@ -47,78 +37,124 @@ def mask_to_color(mask: np.ndarray) -> np.ndarray:
     return colored mask [H,W,3] for visualization
     """
     color = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
-    # class 1 = lung -> green
-    color[mask == 1] = np.array([0, 255, 0], dtype=np.uint8)
+    color[mask == 1] = np.array([0, 255, 0], dtype=np.uint8)  # lung = green
     return color
 
 
 def overlay(img: np.ndarray, colored_mask: np.ndarray, alpha=0.35) -> np.ndarray:
     """alpha blend mask on image"""
-    return (img * (1 - alpha) + colored_mask * alpha).astype(np.uint8)
+    return (img.astype(np.float32) * (1 - alpha) + colored_mask.astype(np.float32) * alpha).astype(np.uint8)
 
 
+# ----------------- main -----------------
 def main():
+    parser = argparse.ArgumentParser()
+
+    # data / io
+    parser.add_argument("--data_root", type=str, default="data/lung_seg")
+    parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
+    parser.add_argument("--out_root", type=str, default="outputs")
+    parser.add_argument("--save_max", type=int, default=30)
+    parser.add_argument("--num_workers", type=int, default=2)
+
+    # model
+    parser.add_argument("--ckpt", type=str, required=True, help="Segmentation model checkpoint (.pth)")
+    parser.add_argument("--num_classes", type=int, default=2)
+
+    parser.add_argument("--backbone", type=str, required=True, choices=["dino", "jepa", "ijepa"])
+    parser.add_argument("--jepa_ckpt", type=str, default=None, help="Required if backbone=jepa")
+    # if your UPerNetSegModel needs anything extra for iJEPA, add args here later (e.g. --ijepa_model_id)
+
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--device", type=str, default=None)
+
+    args = parser.parse_args()
+
+    device = args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
+
     # --- paths
-    img_dir = DATA_ROOT / SPLIT / "images"
-    mask_dir = DATA_ROOT / SPLIT / "masks"
+    data_root = Path(args.data_root)
+    img_dir = data_root / args.split / "images"
+    mask_dir = data_root / args.split / "masks"
     assert img_dir.exists(), f"Missing: {img_dir}"
     assert mask_dir.exists(), f"Missing: {mask_dir}"
 
-    ensure_dir(OUT_DIR)
+    ckpt_path = Path(args.ckpt)
+    assert ckpt_path.exists(), f"Missing checkpoint: {ckpt_path}"
+
+    out_dir = Path(args.out_root) / args.backbone / args.split / ckpt_path.stem
+    ensure_dir(out_dir)
 
     # --- data
     ds = LungSegDataset(str(img_dir), str(mask_dir))
-    loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+    loader = DataLoader(
+        ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
 
     # --- model
-    #model = RadDinoUPerNet(num_classes=NUM_CLASSES).to(DEVICE)
-    JEPA_CKPT = "/data1/mariam/best_jepa_weights.pth.tar"  # <-- set your real path here
+    model_kwargs = dict(
+        num_classes=args.num_classes,
+        backbone=args.backbone,
+    )
+    if args.backbone == "jepa":
+        if args.jepa_ckpt is None:
+            raise ValueError("For --backbone jepa you must pass --jepa_ckpt /path/to/best_jepa_weights.pth.tar")
+        model_kwargs["jepa_ckpt"] = args.jepa_ckpt
 
-    model = UPerNetSegModel(
-    num_classes=NUM_CLASSES,
-    backbone="jepa",
-    jepa_ckpt=JEPA_CKPT
-    ).to(DEVICE)
+    # NOTE: iJEPA should be handled internally by UPerNetSegModel(backbone="ijepa")
+    model = UPerNetSegModel(**model_kwargs).to(device)
 
-    state = torch.load(CKPT_PATH, map_location=DEVICE)
-    model.load_state_dict(state)
+    state = torch.load(str(ckpt_path), map_location=device)
+    model.load_state_dict(state, strict=True)
     model.eval()
 
-    print(f"Loaded checkpoint: {CKPT_PATH}")
-    print(f"Saving visualizations to: {OUT_DIR}")
+    print(f"Loaded segmentation ckpt: {ckpt_path}")
+    print(f"Backbone: {args.backbone}")
+    if args.backbone == "jepa":
+        print(f"JEPA encoder ckpt: {args.jepa_ckpt}")
+    print(f"Saving visualizations to: {out_dir}")
 
     saved = 0
     with torch.no_grad():
         for i, (imgs, masks) in enumerate(loader):
-            imgs = imgs.to(DEVICE)               # [1,3,H,W]
-            masks = masks.to(DEVICE)             # [1,H,W]
+            imgs = imgs.to(device, non_blocking=True)   # [B,3,H,W]
+            masks = masks.to(device, non_blocking=True) # [B,H,W] (or [B,1,H,W] depending on dataset)
 
-            logits = model(imgs)                 # [1,C,H,W]
-            pred = torch.argmax(logits, dim=1)   # [1,H,W]
+            # normalize mask shape to [B,H,W]
+            if masks.ndim == 4 and masks.shape[1] == 1:
+                masks = masks[:, 0]
 
-            # convert to numpy for saving
-            img_np = to_uint8(imgs[0])
-            gt_np = masks[0].detach().cpu().numpy().astype(np.uint8)
-            pred_np = pred[0].detach().cpu().numpy().astype(np.uint8)
+            logits = model(imgs)                        # [B,C,H,W]
+            pred = torch.argmax(logits, dim=1)          # [B,H,W]
 
-            # make overlays
-            gt_col = mask_to_color(gt_np)
-            pred_col = mask_to_color(pred_np)
+            bs = imgs.size(0)
+            for b in range(bs):
+                if saved >= args.save_max:
+                    break
 
-            gt_overlay = overlay(img_np, gt_col, alpha=0.35)
-            pred_overlay = overlay(img_np, pred_col, alpha=0.35)
+                img_np = to_uint8(imgs[b])
+                gt_np = masks[b].detach().cpu().numpy().astype(np.uint8)
+                pred_np = pred[b].detach().cpu().numpy().astype(np.uint8)
 
-            # save: original, gt overlay, pred overlay, raw pred mask
-            Image.fromarray(img_np).save(OUT_DIR / f"{i:04d}_img.png")
-            Image.fromarray(gt_overlay).save(OUT_DIR / f"{i:04d}_gt_overlay.png")
-            Image.fromarray(pred_overlay).save(OUT_DIR / f"{i:04d}_pred_overlay.png")
-            Image.fromarray((pred_np * 255).astype(np.uint8)).save(OUT_DIR / f"{i:04d}_pred_mask.png")
+                gt_overlay = overlay(img_np, mask_to_color(gt_np), alpha=0.35)
+                pred_overlay = overlay(img_np, mask_to_color(pred_np), alpha=0.35)
 
-            saved += 1
-            if saved >= SAVE_MAX:
+                # save
+                Image.fromarray(img_np).save(out_dir / f"{saved:04d}_img.png")
+                Image.fromarray(gt_overlay).save(out_dir / f"{saved:04d}_gt_overlay.png")
+                Image.fromarray(pred_overlay).save(out_dir / f"{saved:04d}_pred_overlay.png")
+                Image.fromarray((pred_np * 255).astype(np.uint8)).save(out_dir / f"{saved:04d}_pred_mask.png")
+
+                saved += 1
+
+            if saved >= args.save_max:
                 break
 
-    print(f"Done. Saved {saved} samples.")
+    print(f"Done. Saved {saved} samples to: {out_dir}")
 
 
 if __name__ == "__main__":

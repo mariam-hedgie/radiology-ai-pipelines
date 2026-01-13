@@ -35,10 +35,11 @@ import torch.nn.functional as F
 from src.backbones.rad_dino_backbone import RadDinoBackbone
 from src.backbones.rad_jepa_backbone import RadJepaBackbone
 from src.decoders.upernet import UPerNetDecoder
+from src.backbones.ijepa_seg_backbone import IJEPAFeatBackbone
 
 
 class UPerNetSegModel(nn.Module):
-    def __init__(self, num_classes, backbone="dino", jepa_ckpt=None):
+    def __init__(self, num_classes, backbone="dino", jepa_ckpt=None, ijepa_model_id="facebook/ijepa_vith16_1k"):
         super().__init__()
 
         if backbone == "dino":
@@ -46,6 +47,8 @@ class UPerNetSegModel(nn.Module):
         elif backbone == "jepa":
             assert jepa_ckpt is not None, "Pass --jepa_ckpt for JEPA backbone"
             self.backbone = RadJepaBackbone(ckpt_path=jepa_ckpt)
+        elif backbone =="ijepa":
+            self.backbone = IJEPAFeatBackbone(model_id=ijepa_model_id)
         else:
             raise ValueError(f"Unknown backbone: {backbone}")
 

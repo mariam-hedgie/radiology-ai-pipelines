@@ -35,7 +35,7 @@ def main():
     parser.add_argument("--num_classes", type=int, default=2)
     parser.add_argument("--device", type=str, default=None)
     
-    parser.add_argument("--backbone", type=str, default="jepa", choices=["dino", "jepa"])
+    parser.add_argument("--backbone", type=str, default="jepa", choices=["dino", "jepa", "ijepa"])
     parser.add_argument("--jepa_ckpt", type=str, default="/data1/mariam/best_jepa_weights.pth.tar")
     args = parser.parse_args()
 
@@ -50,10 +50,10 @@ def main():
 
     #model = RadDinoUPerNet(num_classes=args.num_classes).to(device)
     model = UPerNetSegModel(
-    num_classes=args.num_classes,
-    backbone=args.backbone,
-    jepa_ckpt=args.jepa_ckpt
-).to(device)
+        num_classes=args.num_classes,
+        backbone=args.backbone,
+        jepa_ckpt=args.jepa_ckpt if args.backbone == "jepa" else None,
+    ).to(device)
 
     model.load_state_dict(torch.load(args.ckpt, map_location=device))
     model.eval()
