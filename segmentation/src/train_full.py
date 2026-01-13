@@ -22,7 +22,7 @@ def main():
     ap = argparse.ArgumentParser()
 
     # data
-    ap.add_argument("--dataset", stype=str, required=True,choices=["lung", "vindr_rib"]) # lung is toy dataset, use vindr_rib
+    ap.add_argument("--dataset", type=str, required=True,choices=["lung", "vindr_rib"]) # lung is toy dataset, use vindr_rib
     ap.add_argument("--data_root", type=str, default="data/lung_seg")
     ap.add_argument("--ann_json", type=str, default=None, help="Path to Vindr_RibCXR_*_mask.json")
     ap.add_argument("--image_root", type=str, default=None, help="Root that contains Data/train/img etc.")
@@ -134,11 +134,10 @@ def main():
                 "epochs": args.epochs,
                 "batch_size": args.batch_size,
                 "lr": args.lr,
-                "num_classes": args.num_classes,
                 "jepa_ckpt": args.jepa_ckpt,
                 "ijepa_model_id": args.ijepa_model_id,
                 "dataset": args.dataset,
-                "rib_mode": args.rib_mode if args.dataset == "vindr_rib",
+                "rib_mode": args.rib_mode if args.dataset == "vindr_rib" == "vindr_rib" else None,
                 "num_classes": inferred_num_classes,
             },
         )
