@@ -117,7 +117,6 @@ def main():
     ap.add_argument("--dicom_dir", type=str, required=True)
     ap.add_argument("--labels_csv", type=str, required=True)
 
-    # ONE checkpoint only (no ±)
     ap.add_argument("--ckpt", type=str, required=True)
 
     ap.add_argument("--image_size", type=int, default=224)
