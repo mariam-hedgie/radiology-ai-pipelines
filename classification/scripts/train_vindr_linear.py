@@ -83,8 +83,28 @@ def main():
         image_size=image_size,
         mean=mean,
         std=std,
-    )
+    ) 
     num_classes = full_ds.num_classes
+
+    keep_labels = ["Lung Opacity", 
+        "Cardiomegaly", 
+        "Pleural thickening", 
+        "Aortic enlargement",
+        "Pulmonary fibrosis", 
+        "Tuberculosis", 
+        "Pleural effusion",
+    ]
+
+    missing = [ l for l in keep_labels if l not in full_ds.label_cols]
+    if missing:
+        raise ValueError(f"These labels are missing from CSV header: {missing}")
+
+    keep_idx = [full_ds.label_cols.index(l) for l in keep_labels]
+
+    # override num_classes to mtch the subset
+    num_classes = len(keep_idx)
+    print("Training on labels:", keep_labels)
+    print("Labels indices:", keep_idx)
 
     # split
     g = torch.Generator().manual_seed(args.seed)
@@ -145,6 +165,7 @@ def main():
     else:  # ijepa
         backbone = build_ijepa_backbone(device=device)
 
+    # num_classes is 7
     model = LinearProbeClassifier(backbone=backbone, num_classes=num_classes).to(device)
 
     # freeze backbone
@@ -180,7 +201,7 @@ def main():
 
         for imgs, targets in tqdm(train_loader, desc=f"Epoch {epoch+1:03d} [Train]", leave=False):
             imgs = imgs.to(device, non_blocking=True)
-            targets = targets.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)[:, keep_idx]
 
             optimizer.zero_grad(set_to_none=True)
             logits = model(imgs)
@@ -202,7 +223,7 @@ def main():
         with torch.no_grad():
             for imgs, targets in tqdm(val_loader, desc=f"Epoch {epoch+1:03d} [Val]", leave=False):
                 imgs = imgs.to(device, non_blocking=True)
-                targets = targets.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True)[:, keep_idx]
 
                 logits = model(imgs)
                 loss = criterion(logits, targets)
