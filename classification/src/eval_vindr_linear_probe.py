@@ -58,7 +58,7 @@ def load_head_only(model: LinearProbeClassifier, ckpt_path: str):
 
 
 @torch.no_grad()
-def eval_one_ckpt(model, loader, device, num_classes: int, f1_thresh: float):
+def eval_one_ckpt(model, loader, device, num_classes: int, f1_thresh: float, keep_idx=None):
     model.eval()
     criterion = nn.BCEWithLogitsLoss()
 
@@ -80,6 +80,9 @@ def eval_one_ckpt(model, loader, device, num_classes: int, f1_thresh: float):
     for imgs, targets in tqdm(loader, desc="Eval", leave=False):
         imgs = imgs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True).float()
+
+        if keep_idx is not None:
+            targets = targets[:, keep_idx]
 
         logits = model(imgs)
         loss = criterion(logits, targets)
@@ -126,6 +129,8 @@ def main():
     ap.add_argument("--wandb_project", type=str, default="vindr-linear-probe")
     ap.add_argument("--wandb_name", type=str, default="eval")
 
+    ap.add_argument("--keep_7", action="store_true", help="Evaluate only the 7 target labels")
+
     args = ap.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -158,6 +163,28 @@ def main():
 
     num_classes = ds.num_classes
     class_names = ds.label_cols
+
+    keep_idx = None
+    if args.keep_7:
+        keep_labels = [
+            "Lung Opacity",
+            "Cardiomegaly",
+            "Pleural thickening",
+            "Aortic enlargement",
+            "Pulmonary fibrosis",
+            "Tuberculosis",
+            "Pleural effusion",
+        ]
+        missing = [l for l in keep_labels if l not in class_names]
+        if missing:
+            raise ValueError(f"Missing labels in CSV header: {missing}")
+        
+        keep_idx = [class_names.index(l) for l in keep_labels]
+        class_names = keep_labels
+        num_classes = len(keep_idx)
+
+        print("Evaluating only labels:", keep_labels)
+        print("Indices in CSV", keep_idx)
 
     if args.wandb:
         wandb.init(
@@ -193,7 +220,7 @@ def main():
     ckpt_path = str(Path(args.ckpt))
     load_head_only(model, ckpt_path)
 
-    avg_loss, macro, per_ap, f1m, per_f1 = eval_one_ckpt(model, loader, device, num_classes, args.f1_thresh)
+    avg_loss, macro, per_ap, f1m, per_f1 = eval_one_ckpt(model, loader, device, num_classes, args.f1_thresh, keep_idx=keep_idx)
 
     print(f"\n[{Path(ckpt_path).name}] Loss: {avg_loss:.4f} | AUPRC(macro): {macro:.4f}")
     print(f"F1(macro @ {args.f1_thresh:.2f}): {f1m:.4f}")
