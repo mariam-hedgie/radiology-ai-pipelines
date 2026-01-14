@@ -81,7 +81,7 @@ class FolderClassDataset(Dataset):
 
 
 def collate_fn(batch):
-    imgs, labels = zip(*batch)
+    imgs, labels = zip(*batch) # pair by position
     return torch.stack(imgs, 0), torch.tensor(labels, dtype=torch.long)
 
 
@@ -138,6 +138,44 @@ def binary_auc_from_scores(y_true, y_score):
         auc += (fpr[i] - fpr[i - 1]) * (tpr[i] + tpr[i - 1]) / 2.0
     return auc
 
+def binary_auprc_from_scores(y_true, y_score):
+    """
+    PR-AUC for binary classifciation. 
+    y_true: {0,1}
+    y_score: probability for class1
+    """
+    order = np.argsort(-y_score)
+    y_true = y_true[order]
+
+    P = y_true.sum()
+    if P == 0:
+        return float("nan")
+
+    tp = 0
+    fp = 0
+    precisions = []
+    recalls = []
+
+    for yt in y_true:
+        if yt == 1:
+            tp+=1
+        else:
+            fp+=1
+        prec = tp/(tp+fp+1e-12)
+        rec = tp/(P+1e-12)
+
+        precisions.append(prec)
+        recalls.append(rec)
+    
+    # area udnder PR curve - step integral
+    auprc = 0.0
+    prev_r = 0.0
+    for p, r in zip(precisions, recalls):
+        auprc += p*(r-prev_r)
+        prev_r = r
+
+    return auprc
+
 
 # ------------------ main ------------------
 def main():
@@ -172,6 +210,7 @@ def main():
 
     classes = sorted(p.name for p in split_dir.iterdir() if p.is_dir())
     num_classes = len(classes)
+    print("class order (label mapping):", {c: i for i, c in enumerate(classes)})
 
     ds = FolderClassDataset(
         split_dir,
@@ -250,8 +289,13 @@ def main():
     print(f"Macro F1: {f1.mean():.4f}")
 
     if num_classes == 2:
-        auc = binary_auc_from_scores(y_true, y_prob[:, 1])
-        print(f"ROC-AUC:  {auc:.4f}")
+        pos_scores = y_prob[:, 1]
+
+        roc_auc = binary_auc_from_scores(y_true, pos_scores)
+        auprc = binary_auprc_from_scores(y_true, pos_scores)
+
+        print(f"ROC-AUC: {roc_auc:.4f}")
+        print(f"AUPRC: {auprc:.4f}")
 
     print("\nConfusion Matrix:")
     print(cm)
