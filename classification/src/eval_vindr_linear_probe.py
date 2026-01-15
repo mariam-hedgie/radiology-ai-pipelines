@@ -16,7 +16,7 @@ from src.models.linear_probe import LinearProbeClassifier
 from src.backbones.rad_dino_backbone import build_rad_dino_backbone
 from src.backbones.rad_jepa_backbone import build_rad_jepa_backbone
 from src.backbones.ijepa_backbone import build_ijepa_backbone
-from torchmetrics.classification import MultilabelF1Score
+from torchmetrics.classification import MultilabelF1Score, MultilabelConfusionMatrix
 
 
 def load_head_only(model: LinearProbeClassifier, ckpt_path: str):
@@ -67,6 +67,7 @@ def eval_one_ckpt(model, loader, device, num_classes: int, f1_thresh: float, kee
 
     f1_macro = MultilabelF1Score(num_labels=num_classes, average="macro", threshold=f1_thresh).to(device)
     f1_per   = MultilabelF1Score(num_labels=num_classes, average=None, threshold=f1_thresh).to(device)
+    cm_per = MultilabelConfusionMatrix(num_labels=num_classes, threshold=f1_thresh).to(device)
 
     loss_sum = 0.0
     n = 0
@@ -76,6 +77,8 @@ def eval_one_ckpt(model, loader, device, num_classes: int, f1_thresh: float, kee
 
     f1_macro.reset()
     f1_per.reset()
+
+    cm_per.reset()
 
     for imgs, targets in tqdm(loader, desc="Eval", leave=False):
         imgs = imgs.to(device, non_blocking=True)
@@ -98,6 +101,8 @@ def eval_one_ckpt(model, loader, device, num_classes: int, f1_thresh: float, kee
         f1_macro.update(probs, targets.int())
         f1_per.update(probs, targets.int())
 
+        cm_per.update(probs, targets.int())
+
     avg_loss = loss_sum / max(1, n)
     macro = float(auprc_macro.compute().item())
     per_ap = auprc_per.compute().detach().cpu().numpy().astype(np.float64)  # [K]
@@ -105,7 +110,9 @@ def eval_one_ckpt(model, loader, device, num_classes: int, f1_thresh: float, kee
     f1m = float(f1_macro.compute().item())
     per_f1 = f1_per.compute().detach().cpu().numpy().astype(np.float64)
 
-    return avg_loss, macro, per_ap, f1m, per_f1
+    per_cm = cm_per.compute().detach().cpu().numpy().astype(np.int64)  # shape [K, 2, 2]
+
+    return avg_loss, macro, per_ap, f1m, per_f1, per_cm
 
 
 def main():
@@ -219,7 +226,7 @@ def main():
     ckpt_path = str(Path(args.ckpt))
     load_head_only(model, ckpt_path)
 
-    avg_loss, macro, per_ap, f1m, per_f1 = eval_one_ckpt(model, loader, device, num_classes, args.f1_thresh, keep_idx=keep_idx)
+    avg_loss, macro, per_ap, f1m, per_f1, per_cm = eval_one_ckpt(model, loader, device, num_classes, args.f1_thresh, keep_idx=keep_idx)
 
     print(f"\n[{Path(ckpt_path).name}] Loss: {avg_loss:.4f} | AUPRC(macro): {macro:.4f}")
     print(f"F1(macro @ {args.f1_thresh:.2f}): {f1m:.4f}")
@@ -249,6 +256,12 @@ def main():
     print("\nAll classes (single ckpt) — in CSV header order:")
     for i, (name, apv, f1v) in enumerate(zip(class_names, per_ap, per_f1)):
         print(f"{name:25s} AP {100.0*float(apv):5.1f} | F1 {100.0*float(f1v):5.1f}")
+
+    print(f"\nPer-class confusion matrices @ threshold={args.f1_thresh:.2f} (TN FP / FN TP):")
+    for i, name in enumerate(class_names):
+        tn, fp = per_cm[i, 0, 0], per_cm[i, 0, 1]
+        fn, tp = per_cm[i, 1, 0], per_cm[i, 1, 1]
+        print(f"{name:25s}  TN {tn:6d}  FP {fp:6d}  FN {fn:6d}  TP {tp:6d}")
 
     if args.wandb:
         wandb.log(

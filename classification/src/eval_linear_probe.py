@@ -138,43 +138,6 @@ def binary_auc_from_scores(y_true, y_score):
         auc += (fpr[i] - fpr[i - 1]) * (tpr[i] + tpr[i - 1]) / 2.0
     return auc
 
-def binary_auprc_from_scores(y_true, y_score):
-    """
-    PR-AUC for binary classifciation. 
-    y_true: {0,1}
-    y_score: probability for class1
-    """
-    order = np.argsort(-y_score)
-    y_true = y_true[order]
-
-    P = y_true.sum()
-    if P == 0:
-        return float("nan")
-
-    tp = 0
-    fp = 0
-    precisions = []
-    recalls = []
-
-    for yt in y_true:
-        if yt == 1:
-            tp+=1
-        else:
-            fp+=1
-        prec = tp/(tp+fp+1e-12)
-        rec = tp/(P+1e-12)
-
-        precisions.append(prec)
-        recalls.append(rec)
-    
-    # area udnder PR curve - step integral
-    auprc = 0.0
-    prev_r = 0.0
-    for p, r in zip(precisions, recalls):
-        auprc += p*(r-prev_r)
-        prev_r = r
-
-    return auprc
 
 
 # ------------------ main ------------------
