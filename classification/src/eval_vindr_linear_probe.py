@@ -10,14 +10,13 @@ from tqdm import tqdm
 import wandb
 
 from torchmetrics.classification import MultilabelAveragePrecision
+from torchmetrics.classification import MultilabelF1Score, MultilabelConfusionMatrix
 
 from src.datasets.vindr_dataset import VinDrCXRImageLabels
 from src.models.linear_probe import LinearProbeClassifier
 from src.backbones.rad_dino_backbone import build_rad_dino_backbone
 from src.backbones.rad_jepa_backbone import build_rad_jepa_backbone
 from src.backbones.ijepa_backbone import build_ijepa_backbone
-from torchmetrics.classification import MultilabelF1Score, MultilabelConfusionMatrix
-
 
 def load_head_only(model: LinearProbeClassifier, ckpt_path: str):
     """
@@ -140,9 +139,13 @@ def main():
     args = ap.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Match preprocessing to backbone (IMPORTANT for iJEPA 448)
+    # change resolution as needed
     if args.backbone == "ijepa":
         image_size = 448
+        mean = (0.5, 0.5, 0.5)
+        std = (0.5, 0.5, 0.5)
+    elif args.backbone == "jepa": # changing image size to 518 for jepa
+        image_size = 518
         mean = (0.5, 0.5, 0.5)
         std = (0.5, 0.5, 0.5)
     else:

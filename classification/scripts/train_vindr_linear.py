@@ -72,6 +72,10 @@ def main():
         image_size = 448
         mean = (0.5, 0.5, 0.5)
         std  = (0.5, 0.5, 0.5)
+    elif args.backbone == "jepa": # changing image size to 518 for jepa
+        image_size = 518
+        mean = (0.5, 0.5, 0.5)
+        std = (0.5, 0.5, 0.5)
     else:
         image_size = args.image_size
         mean = (0.485, 0.456, 0.406)
@@ -160,7 +164,7 @@ def main():
     elif args.backbone == "jepa":
         if args.jepa_ckpt is None:
             raise ValueError("For --backbone jepa you must pass --jepa_ckpt /path/to/weights.pth.tar")
-        backbone = build_rad_jepa_backbone(jepa_ckpt=args.jepa_ckpt, device=device)
+        backbone = build_rad_jepa_backbone(jepa_ckpt=args.jepa_ckpt, device=device, img_size=image_size)
 
     else:  # ijepa
         backbone = build_ijepa_backbone(device=device)
